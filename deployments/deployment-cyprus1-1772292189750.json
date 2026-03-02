@@ -1,0 +1,24 @@
+{
+  "network": "cyprus1",
+  "chainId": "15000",
+  "deployer": "0x007204C0F8eB96e207482e1C472E4f74309aDb86",
+  "timestamp": "2026-02-28T15:23:09.750Z",
+  "contracts": {
+    "QuaiVault": "0x007563E17facaBF97888Bc809e84A8251f0b979D",
+    "QuaiVaultFactory": "0x0034D03A40526D944c43C0E12a0076d5Ff6f2Cf7",
+    "SocialRecoveryModule": "0x00582bDaB79a8D49888307A1a8ec776129Df1242",
+    "MultiSend": "0x0023EE40A94aDF5887511A36F135aaB11B9B8879",
+    "MockModule": "0x00185c4e94c44cc2275e38c1668327499d899DEC",
+    "MockERC721": "0x007863e8C008495aEcD049FB06a4A9794C44E44a",
+    "MockERC1155": "0x003f96fdf3c2CbCeFc5471Bd580CD02Ad2E38945"
+  },
+  "ipfsHashes": {
+    "QuaiVault": "QmTvhdiVgsKWE7m7bS6rdKLZ5QBetoM3sQo1LqxrDBQvQy",
+    "QuaiVaultFactory": "QmfP9x9Q4PQZqaabfZT9NVVUhumoqVpjn58z4Rq9373dEj",
+    "SocialRecoveryModule": "QmYE4CMgdrzfQTHTNA5NUtXHc5fzZiVgj66S3twp37zCH9",
+    "MultiSend": "QmdPgKUXmzQVFQmDtEKiciCsVcd1a7gbfvyZU3naQbN2CE",
+    "MockModule": "QmW3o96Z5V5fpSHiNxNX8sWm3fcRebTFkSzoCLUxF1sVY3",
+    "MockERC721": "Qmf6cBTNLXFLkHZU3zW9DJZzj1Bayw9WjEQKMxUtyXpYB1",
+    "MockERC1155": "QmNRNqVWVqZWU6FeyjMzX3siMHVfchkdreFsUw5sGyxraH"
+  }
+}

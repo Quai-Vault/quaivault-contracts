@@ -1,0 +1,22 @@
+{
+  "network": "cyprus1",
+  "chainId": "15000",
+  "deployer": "0x007204C0F8eB96e207482e1C472E4f74309aDb86",
+  "timestamp": "2026-02-04T18:26:03.283Z",
+  "contracts": {
+    "QuaiVault": "0x00018416b62a1Fe75Bd7876Ac71b2D590Ff1832b",
+    "ProxyFactory": "0x0053a2d82A2Df99da48443c35A617635De57B42A",
+    "SocialRecoveryModule": "0x006e5abeDB70C842929BDE87B052Ad716CC31eE4",
+    "DailyLimitModule": "0x00629c56459529eB62ec31678C404970cFA0261E",
+    "WhitelistModule": "0x0058A9B04f0FCCd6520388308CC83038201256Cc",
+    "MultiSend": "0x0054C43973918A5052098a8D163B9D63063C4C21"
+  },
+  "ipfsHashes": {
+    "QuaiVault": "QmR8ENduakL7wWmerLn1aGxv8RpGYF95yQxz78xA8Hcc3U",
+    "ProxyFactory": "QmduGuY2y1CuyLbweQPDGQpUtEpFXXsKia42kQw2zSoQ61",
+    "SocialRecoveryModule": "QmdqgCCqMPNzznQ9QEhN9foopGfPdCzbNGik3E5gMZCDAX",
+    "DailyLimitModule": "QmYSRMjs5UMMmWFGDUtVYAnxFopWanWWZJx9iTb7BPQvT7",
+    "WhitelistModule": "QmNxJzyMtPvkjsPenfqh8iCYojgZYVZDxbTPPPsxTk6Ldt",
+    "MultiSend": "QmdPgKUXmzQVFQmDtEKiciCsVcd1a7gbfvyZU3naQbN2CE"
+  }
+}

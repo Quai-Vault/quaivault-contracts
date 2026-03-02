@@ -1,0 +1,20 @@
+{
+  "network": "cyprus1",
+  "chainId": "15000",
+  "deployer": "0x007204C0F8eB96e207482e1C472E4f74309aDb86",
+  "timestamp": "2026-01-22T15:16:19.122Z",
+  "contracts": {
+    "MultisigWallet": "0x006832A3fEE42Af338ACb6E8bA47b3DcBa07527F",
+    "ProxyFactory": "0x006e8e0fD3B28700702ac5918B89692Ac6D1eB35",
+    "SocialRecoveryModule": "0x006608f2A1c80A10C0594d4F5A08891C8ce13B65",
+    "DailyLimitModule": "0x00455e94576e233b70882f6b5F76af7015b433E4",
+    "WhitelistModule": "0x0050A7d960dB532A87c5b818612c5B52a1538d78"
+  },
+  "ipfsHashes": {
+    "MultisigWallet": "QmWDhbimHVdVj4fHdAx2iqcqsVdD4McecVvVtuthVukejF",
+    "ProxyFactory": "QmciJcked1F2SuAirEignmAHBwgvVCanPqorkb3QhaYjji",
+    "SocialRecoveryModule": "QmbmSbPmWPVWuYoBvg84XCXp1ZQrqZinZ92E2W1h1jrfRj",
+    "DailyLimitModule": "QmSvX1JJuPhLc2A7YSuAMacHAzyCzhQwQvoK5LeVQDkwS1",
+    "WhitelistModule": "QmP1FS9YcdTNMLLTv3ch5r8U5sFG7L1JTwSktAFDuWnMMx"
+  }
+}
