@@ -214,7 +214,10 @@ Two audit rounds completed. All findings addressed:
 - Round 1: Critical, High, Medium, and Low severity findings — all fixed
 - Round 2: Verification of Round 1 fixes + new findings — all fixed
 
-266 unit tests + 49 E2E on-chain tests covering all audit fixes.
+266 unit tests + 53 E2E on-chain tests covering all audit fixes.
+
+See [SECURITY_GUIDE.md](SECURITY_GUIDE.md) for a detailed threat model, attack vector
+analysis, and operational security recommendations for wallet owners.
 
 ## Comparison to Gnosis Safe
 
