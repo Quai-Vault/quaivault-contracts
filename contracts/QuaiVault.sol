@@ -77,6 +77,12 @@ contract QuaiVault is
     /// @dev EIP-712 domain version (I-2)
     string private constant DOMAIN_VERSION = "1";
 
+    /// @dev EIP-712 precomputed domain name hash (avoids runtime keccak256 in domainSeparator)
+    bytes32 private constant DOMAIN_NAME_HASH = keccak256(bytes("QuaiVault"));
+
+    /// @dev EIP-712 precomputed domain version hash
+    bytes32 private constant DOMAIN_VERSION_HASH = keccak256(bytes("1"));
+
     /// @dev EIP-712 message typehash for QuaiVault signed messages
     bytes32 private constant QUAIVAULT_MSG_TYPEHASH =
         keccak256("QuaiVaultMessage(bytes message)");
@@ -187,8 +193,8 @@ contract QuaiVault is
     event OwnerAdded(address indexed owner);
     event OwnerRemoved(address indexed owner);
     event ThresholdChanged(uint256 threshold);
-    event ModuleEnabled(address indexed module);
-    event ModuleDisabled(address indexed module);
+    event EnabledModule(address indexed module);
+    event DisabledModule(address indexed module);
     event ExecutionFromModuleSuccess(address indexed module);
     event ExecutionFromModuleFailure(address indexed module);
     event Received(address indexed sender, uint256 amount);
@@ -269,14 +275,15 @@ contract QuaiVault is
         __ERC721Holder_init();
         __ERC1155Holder_init();
 
-        for (uint256 i = 0; i < _owners.length; i++) {
+        for (uint256 i = 0; i < _owners.length;) {
             address owner = _owners[i];
 
-            if (owner == address(0)) revert InvalidOwnerAddress();
+            if (owner == address(0) || owner == address(this)) revert InvalidOwnerAddress();
             if (isOwner[owner]) revert DuplicateOwner();
 
             isOwner[owner] = true;
             owners.push(owner);
+            unchecked { i++; }
         }
 
         threshold = _threshold;
@@ -301,7 +308,7 @@ contract QuaiVault is
     function proposeTransaction(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         uint48 expiration,
         uint32 requestedDelay
     ) external onlyOwner returns (bytes32) {
@@ -319,7 +326,7 @@ contract QuaiVault is
     function proposeTransaction(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         uint48 expiration
     ) external onlyOwner returns (bytes32) {
         return _proposeTransaction(to, value, data, expiration, 0);
@@ -335,7 +342,7 @@ contract QuaiVault is
     function proposeTransaction(
         address to,
         uint256 value,
-        bytes memory data
+        bytes calldata data
     ) external onlyOwner returns (bytes32) {
         return _proposeTransaction(to, value, data, 0, 0);
     }
@@ -349,7 +356,7 @@ contract QuaiVault is
     function _proposeTransaction(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         uint48 expiration,
         uint32 requestedDelay
     ) internal returns (bytes32) {
@@ -369,7 +376,8 @@ contract QuaiVault is
         // Validate expiration is far enough in the future to allow at least one execution attempt
         // after the timelock elapses. Uses current block.timestamp as proxy for approval time.
         if (expiration != 0) {
-            uint256 minimumExpiration = block.timestamp + effectiveDelay;
+            uint256 minimumExpiration;
+            unchecked { minimumExpiration = block.timestamp + effectiveDelay; } // uint32 delay can't overflow uint256
             if (expiration <= minimumExpiration) revert ExpirationTooSoon(minimumExpiration);
         }
 
@@ -391,7 +399,7 @@ contract QuaiVault is
             data: data
         });
 
-        nonce++;
+        unchecked { nonce++; } // uint256 can't overflow in practice
 
         // I-1: Include expiration and executionDelay for complete off-chain lifecycle tracking
         emit TransactionProposed(txHash, msg.sender, to, value, data, expiration, effectiveDelay);
@@ -423,7 +431,8 @@ contract QuaiVault is
         Transaction storage transaction = transactions[txHash];
         if (transaction.approvedAt == 0 && _countValidApprovals(txHash) >= threshold) {
             transaction.approvedAt = uint48(block.timestamp);
-            uint256 executableAfter = uint256(transaction.approvedAt) + transaction.executionDelay;
+            uint256 executableAfter;
+            unchecked { executableAfter = uint256(transaction.approvedAt) + transaction.executionDelay; } // uint48 + uint32 can't overflow uint256
             emit ThresholdReached(txHash, transaction.approvedAt, executableAfter);
         }
     }
@@ -460,7 +469,8 @@ contract QuaiVault is
         // Detect first threshold crossing
         if (transaction.approvedAt == 0 && validCount >= threshold) {
             transaction.approvedAt = uint48(block.timestamp);
-            uint256 executableAfter = uint256(transaction.approvedAt) + transaction.executionDelay;
+            uint256 executableAfter;
+            unchecked { executableAfter = uint256(transaction.approvedAt) + transaction.executionDelay; } // uint48 + uint32 can't overflow uint256
             emit ThresholdReached(txHash, transaction.approvedAt, executableAfter);
         }
 
@@ -469,8 +479,10 @@ contract QuaiVault is
         // For timelocked external calls: return false if delay has not elapsed yet
         bool isSelfCall = transaction.to == address(this);
         if (!isSelfCall && transaction.executionDelay > 0) {
-            if (block.timestamp < uint256(transaction.approvedAt) + transaction.executionDelay)
-                return false;
+            unchecked {
+                if (block.timestamp < uint256(transaction.approvedAt) + transaction.executionDelay)
+                    return false;
+            }
         }
 
         _executeTransaction(txHash, transaction);
@@ -506,7 +518,8 @@ contract QuaiVault is
         // never start. Instead, commit the clock start and return; caller tries again after delay.
         if (!isSelfCall && transaction.executionDelay > 0 && transaction.approvedAt == 0) {
             transaction.approvedAt = uint48(block.timestamp);
-            uint256 executableAfter = uint256(transaction.approvedAt) + transaction.executionDelay;
+            uint256 executableAfter;
+            unchecked { executableAfter = uint256(transaction.approvedAt) + transaction.executionDelay; } // uint48 + uint32 can't overflow uint256
             emit ThresholdReached(txHash, transaction.approvedAt, executableAfter);
             return;
         }
@@ -583,7 +596,8 @@ contract QuaiVault is
         // approveAndExecute, or the lazy clock path in executeTransaction (which returns before
         // reaching here if the delay hasn't elapsed).
         if (!isSelfCall && transaction.executionDelay > 0) {
-            uint256 executableAfter = uint256(transaction.approvedAt) + transaction.executionDelay;
+            uint256 executableAfter;
+            unchecked { executableAfter = uint256(transaction.approvedAt) + transaction.executionDelay; } // uint48 + uint32 can't overflow uint256
             if (block.timestamp < executableAfter)
                 revert TimelockNotElapsed(executableAfter);
         }
@@ -618,14 +632,18 @@ contract QuaiVault is
      *      from that address without touching in-flight transaction storage.
      */
     function _approvalValid(bytes32 txHash, address owner) internal view returns (bool) {
-        return _approvalEpochs[txHash][owner] == ownerVersions[owner] + 1;
+        unchecked {
+            return _approvalEpochs[txHash][owner] == ownerVersions[owner] + 1;
+        }
     }
 
     /**
      * @notice Record an approval at the current owner version
      */
     function _setApproval(bytes32 txHash, address owner) internal {
-        _approvalEpochs[txHash][owner] = ownerVersions[owner] + 1;
+        unchecked {
+            _approvalEpochs[txHash][owner] = ownerVersions[owner] + 1;
+        }
     }
 
     /**
@@ -642,8 +660,10 @@ contract QuaiVault is
      *      H-2: Epoch check also prevents ghost approval resurrection after remove+re-add.
      */
     function _countValidApprovals(bytes32 txHash) internal view returns (uint256 count) {
-        for (uint256 i = 0; i < owners.length; i++) {
+        uint256 len = owners.length;
+        for (uint256 i = 0; i < len;) {
             if (_approvalValid(txHash, owners[i])) count++;
+            unchecked { i++; }
         }
     }
 
@@ -654,8 +674,10 @@ contract QuaiVault is
      *      Sets epoch to 0, which is never a valid approval epoch (ownerVersions+1 >= 1).
      */
     function _clearApprovals(bytes32 txHash) internal {
-        for (uint256 i = 0; i < owners.length; i++) {
+        uint256 len = owners.length;
+        for (uint256 i = 0; i < len;) {
             _approvalEpochs[txHash][owners[i]] = 0;
+            unchecked { i++; }
         }
     }
 
@@ -671,7 +693,7 @@ contract QuaiVault is
     // ==================== Owner Management ====================
 
     function _addOwner(address owner) internal {
-        if (owner == address(0)) revert InvalidOwnerAddress();
+        if (owner == address(0) || owner == address(this)) revert InvalidOwnerAddress();
         if (isOwner[owner]) revert AlreadyAnOwner();
         if (owners.length >= MAX_OWNERS) revert MaxOwnersReached();
 
@@ -692,20 +714,24 @@ contract QuaiVault is
      */
     function _removeOwner(address owner) internal {
         if (!isOwner[owner]) revert NotAnOwner();
-        if (owners.length - 1 < threshold) revert CannotRemoveOwnerWouldFallBelowThreshold();
+        uint256 len = owners.length;
+        unchecked {
+            if (len - 1 < threshold) revert CannotRemoveOwnerWouldFallBelowThreshold(); // len >= 1 (owner exists)
+        }
 
         isOwner[owner] = false;
 
         // H-2: Increment owner version to atomically invalidate all in-flight approvals from
         // this address. O(1) — no loop over active transactions needed.
-        ownerVersions[owner]++;
+        unchecked { ownerVersions[owner]++; } // uint256 can't overflow in practice
 
-        for (uint256 i = 0; i < owners.length; i++) {
+        for (uint256 i = 0; i < len;) {
             if (owners[i] == owner) {
-                owners[i] = owners[owners.length - 1];
+                unchecked { owners[i] = owners[len - 1]; }
                 owners.pop();
                 break;
             }
+            unchecked { i++; }
         }
 
         emit OwnerRemoved(owner);
@@ -750,9 +776,10 @@ contract QuaiVault is
      *      through _executeSelfCall.
      */
     function _cancelByConsensus(bytes32 txHash) internal {
-        if (transactions[txHash].to == address(0)) revert TransactionDoesNotExist();
-        if (transactions[txHash].executed)          revert TransactionAlreadyExecuted();
-        if (transactions[txHash].cancelled)         revert TransactionAlreadyCancelled();
+        Transaction storage transaction = transactions[txHash];
+        if (transaction.to == address(0)) revert TransactionDoesNotExist();
+        if (transaction.executed)          revert TransactionAlreadyExecuted();
+        if (transaction.cancelled)         revert TransactionAlreadyCancelled();
         _cancelTransaction(txHash);
     }
 
@@ -828,9 +855,7 @@ contract QuaiVault is
             _changeThreshold(newThreshold);
         } else if (selector == this.signMessage.selector) {
             bytes memory messageData = abi.decode(_stripSelector(data), (bytes));
-            bytes32 msgHash = getMessageHash(messageData);
-            signedMessages[msgHash] = true;
-            emit MessageSigned(msgHash, messageData);
+            _signMessage(messageData);
         } else if (selector == this.unsignMessage.selector) {
             bytes memory messageData = abi.decode(_stripSelector(data), (bytes));
             _unsignMessage(messageData);
@@ -860,7 +885,8 @@ contract QuaiVault is
      *      which the EVM zero-pads — safe and consistent with the Gnosis Safe pattern.
      */
     function _stripSelector(bytes memory data) internal pure returns (bytes memory) {
-        bytes memory result = new bytes(data.length - 4);
+        bytes memory result;
+        unchecked { result = new bytes(data.length - 4); } // caller validates data.length >= 4
         assembly {
             let src := add(data, 0x24)
             let dst := add(result, 0x20)
@@ -883,9 +909,9 @@ contract QuaiVault is
 
         modules[module] = modules[SENTINEL_MODULES];
         modules[SENTINEL_MODULES] = module;
-        moduleCount++;
+        unchecked { moduleCount++; } // bounded by MAX_MODULES check above
 
-        emit ModuleEnabled(module);
+        emit EnabledModule(module);
     }
 
     /**
@@ -904,9 +930,9 @@ contract QuaiVault is
 
         modules[prevModule] = modules[module];
         modules[module] = address(0);
-        moduleCount--;
+        unchecked { moduleCount--; } // module was verified enabled above
 
-        emit ModuleDisabled(module);
+        emit DisabledModule(module);
     }
 
     function disableModule(address prevModule, address module) external onlySelf {
@@ -939,15 +965,11 @@ contract QuaiVault is
         ) {
             array[count] = next;
             next = modules[next];
-            count++;
+            unchecked { count++; } // bounded by pageSize
         }
 
         assembly {
             mstore(array, count)
-        }
-
-        if (next == SENTINEL_MODULES) {
-            next = SENTINEL_MODULES;
         }
     }
 
@@ -983,7 +1005,7 @@ contract QuaiVault is
     function execTransactionFromModule(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         Enum.Operation operation
     ) public onlyModule nonReentrant returns (bool success) {
         if (to == address(0)) revert InvalidDestinationAddress();
@@ -1004,14 +1026,15 @@ contract QuaiVault is
 
     /**
      * @notice Legacy 3-param version for backward compatibility
-     * @dev QV-M-2: Delegates to the nonReentrant 4-param version — reentrancy protection applies
-     *      via the 4-param function's nonReentrant modifier.
+     * @dev QV-M-2: Delegates to the 4-param version which enforces onlyModule and nonReentrant.
+     *      No onlyModule here — msg.sender is unchanged on internal calls, so the 4-param
+     *      version's onlyModule check is sufficient and avoids a redundant SLOAD.
      */
     function execTransactionFromModule(
         address to,
         uint256 value,
-        bytes memory data
-    ) external onlyModule returns (bool success) {
+        bytes calldata data
+    ) external returns (bool success) {
         return execTransactionFromModule(to, value, data, Enum.Operation.Call);
     }
 
@@ -1022,7 +1045,7 @@ contract QuaiVault is
     function execTransactionFromModuleReturnData(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         Enum.Operation operation
     ) external onlyModule nonReentrant returns (bool success, bytes memory returnData) {
         if (to == address(0)) revert InvalidDestinationAddress();
@@ -1049,7 +1072,7 @@ contract QuaiVault is
     function getTransactionHash(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         uint256 _nonce
     ) public view returns (bytes32) {
         return keccak256(
@@ -1098,8 +1121,8 @@ contract QuaiVault is
         return keccak256(
             abi.encode(
                 DOMAIN_SEPARATOR_TYPEHASH,
-                keccak256(bytes(DOMAIN_NAME)),
-                keccak256(bytes(DOMAIN_VERSION)),
+                DOMAIN_NAME_HASH,
+                DOMAIN_VERSION_HASH,
                 block.chainid,
                 address(this)
             )
@@ -1120,6 +1143,10 @@ contract QuaiVault is
     }
 
     function signMessage(bytes calldata data) external onlySelf {
+        _signMessage(data);
+    }
+
+    function _signMessage(bytes memory data) internal {
         bytes32 msgHash = getMessageHash(data);
         signedMessages[msgHash] = true;
         emit MessageSigned(msgHash, data);

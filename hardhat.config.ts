@@ -28,20 +28,6 @@ const config: HardhatUserConfig = {
           },
         },
       },
-      {
-        version: "0.8.17",
-        settings: {
-          optimizer: {
-            enabled: true,
-            runs: 1000,
-          },
-          evmVersion: "london",
-          metadata: {
-            bytecodeHash: "ipfs",
-            useLiteralContent: true,
-          },
-        },
-      },
     ],
   },
   networks: {
@@ -100,9 +86,6 @@ const config: HardhatUserConfig = {
       accounts: process.env.HYDRA3_PK ? [process.env.HYDRA3_PK] : [],
       chainId: chainId,
     },
-  },
-  etherscan: {
-    apiKey: process.env.ETHERSCAN_API_KEY || "",
   },
   gasReporter: {
     enabled: process.env.REPORT_GAS === "true",

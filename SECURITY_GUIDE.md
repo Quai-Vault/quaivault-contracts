@@ -82,6 +82,12 @@ T+24:00   Attacker calls executeRecovery — owners replaced, wallet taken over
 The SocialRecoveryModule enforces a minimum 1-day recovery period. During this window,
 owners see the `RecoveryInitiated` event and can call `cancelRecovery`.
 
+Recoveries also have an **expiration deadline** of `executionTime + recoveryPeriod` (2x total
+lifetime from initiation). If the attacker does not execute within this window, anyone can
+call `expireRecovery` to permissionlessly clean up the stale recovery. Additionally, when
+any recovery executes successfully, all other pending recoveries for that wallet are
+automatically invalidated — preventing attackers from queueing multiple recovery attempts.
+
 **But**: If owners have lost all their keys (the scenario recovery is designed for),
 there is no way to cancel. Guardian compromise in that situation is unrecoverable.
 
@@ -219,8 +225,9 @@ Individual transactions can request a longer delay but never a shorter one.
 **Self-calls always execute immediately regardless of `minExecutionDelay`.** This is by
 design — see "Key Compromise + Self-Call Bypass" above for the rationale.
 
-To change the delay after deployment: propose a `setMinExecutionDelay(newDelay)` self-call.
-Requires multisig consensus. Takes effect immediately.
+The factory enforces a maximum of **30 days** (2,592,000 seconds) for `minExecutionDelay`
+at deployment. Wallets can change their delay after deployment via `setMinExecutionDelay(newDelay)`
+self-call (requires multisig consensus, takes effect immediately), which has no upper bound.
 
 ### Monitoring Checklist
 
@@ -236,10 +243,13 @@ Set up automated alerts for these on-chain events:
 | `ThresholdChanged` | Threshold changed. If unexpected, assume compromise. |
 | `ModuleEnabled` / `ModuleDisabled` | Module configuration changed. Verify the module address. |
 | `RecoveryInitiated` | Recovery started — if unexpected, call `cancelRecovery` immediately. |
+| `RecoveryInvalidated` | A pending recovery was invalidated because another recovery executed. |
+| `RecoveryExpiredEvent` | A recovery expired and was cleaned up. Investigate if unexpected. |
 | `MinExecutionDelayChanged` | Timelock changed. A delay reduction could weaken security. |
 
-**The most critical alert is `RecoveryInitiated`.** You have exactly `recoveryPeriod`
-seconds (minimum 24 hours) to cancel before the recovery executes and replaces all owners.
+**The most critical alert is `RecoveryInitiated`.** You have until `executionTime + recoveryPeriod`
+(2x the recovery period from initiation, minimum 48 hours total lifetime) before the recovery
+either executes and replaces all owners, or expires and becomes permissionlessly cleanable.
 
 ### Transaction Verification Protocol
 
@@ -262,6 +272,12 @@ Before approving any transaction:
   For 5 guardians, require 3-of-5 or 4-of-5.
 - **Recovery period**: The contract enforces a 1-day minimum. For high-value wallets,
   use 7 days or longer to give owners maximum time to detect and cancel
+- **Recovery expiration**: Recoveries expire at `executionTime + recoveryPeriod` (2x total
+  lifetime from initiation). After expiration, anyone can call `expireRecovery` to clean up
+  stale recoveries. This prevents abandoned recoveries from permanently blocking new ones.
+- **Automatic invalidation**: When a recovery executes, all other pending recoveries for
+  that wallet are automatically invalidated. This ensures stale recoveries with pre-change
+  guardian approvals cannot survive an ownership change.
 - **Test recovery**: Periodically verify that guardians are still accessible and that
   the recovery flow works. A recovery system that fails when needed is worse than none.
 - **Separation of roles**: Wallet owners should NOT also be guardians. Guardians are

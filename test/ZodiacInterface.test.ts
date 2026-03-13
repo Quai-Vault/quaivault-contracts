@@ -108,7 +108,7 @@ describe("ZodiacInterface", function () {
         const { executeTx } = await executeWalletSelfCall(enableData);
 
         await expect(executeTx)
-          .to.emit(wallet, "ModuleEnabled")
+          .to.emit(wallet, "EnabledModule")
           .withArgs(await mockModule.getAddress());
 
         expect(await wallet.isModuleEnabled(await mockModule.getAddress())).to.be.true;
@@ -224,7 +224,7 @@ describe("ZodiacInterface", function () {
         const { executeTx } = await executeWalletSelfCall(disableData);
 
         await expect(executeTx)
-          .to.emit(wallet, "ModuleDisabled")
+          .to.emit(wallet, "DisabledModule")
           .withArgs(await mockModule.getAddress());
 
         expect(await wallet.isModuleEnabled(await mockModule.getAddress())).to.be.false;
@@ -729,6 +729,56 @@ describe("ZodiacInterface", function () {
           ethers.ZeroAddress, 0, "0x", 1 // DelegateCall
         )
       ).to.be.revertedWithCustomError(wallet, "InvalidDestinationAddress");
+    });
+
+    it("module can enable another module via execTransactionFromModule (Zodiac trust model)", async function () {
+      // Enable mockModule
+      const enableData = wallet.interface.encodeFunctionData("enableModule", [await mockModule.getAddress()]);
+      await executeWalletSelfCall(enableData);
+      expect(await wallet.isModuleEnabled(await mockModule.getAddress())).to.be.true;
+
+      // Deploy a second module
+      const MockModuleFactory = await ethers.getContractFactory("MockModule");
+      const secondModule = await MockModuleFactory.deploy(await wallet.getAddress());
+      await secondModule.waitForDeployment();
+      const secondModuleAddr = await secondModule.getAddress();
+
+      // mockModule calls execTransactionFromModule to enable secondModule
+      // This works because the call goes: mockModule -> wallet.execTransactionFromModule(wallet, 0, enableModule(secondModule))
+      // which becomes wallet.call(enableModule(secondModule)) where msg.sender == wallet == address(this)
+      const result = await mockModule.tryEnableModule(secondModuleAddr);
+      const receipt = await result.wait();
+      expect(receipt?.status).to.equal(1);
+
+      // Second module should now be enabled — this is by-design Zodiac trust model
+      expect(await wallet.isModuleEnabled(secondModuleAddr)).to.be.true;
+    });
+
+    it("module can disable another module via execTransactionFromModule (Zodiac trust model)", async function () {
+      // Enable two modules
+      const mockModuleAddr = await mockModule.getAddress();
+      const MockModuleFactory = await ethers.getContractFactory("MockModule");
+      const secondModule = await MockModuleFactory.deploy(await wallet.getAddress());
+      await secondModule.waitForDeployment();
+      const secondModuleAddr = await secondModule.getAddress();
+
+      const enableData1 = wallet.interface.encodeFunctionData("enableModule", [mockModuleAddr]);
+      await executeWalletSelfCall(enableData1);
+      const enableData2 = wallet.interface.encodeFunctionData("enableModule", [secondModuleAddr]);
+      await executeWalletSelfCall(enableData2);
+
+      expect(await wallet.isModuleEnabled(secondModuleAddr)).to.be.true;
+
+      // Linked list order: SENTINEL -> secondModule -> mockModule
+      // To remove secondModule, prevModule must be SENTINEL
+      const SENTINEL = "0x0000000000000000000000000000000000000001";
+      const result = await mockModule.tryDisableModule(SENTINEL, secondModuleAddr);
+      const receipt = await result.wait();
+      expect(receipt?.status).to.equal(1);
+
+      expect(await wallet.isModuleEnabled(secondModuleAddr)).to.be.false;
+      // mockModule should still be enabled
+      expect(await wallet.isModuleEnabled(mockModuleAddr)).to.be.true;
     });
 
     it("module can call addOwner (required by SocialRecoveryModule)", async function () {

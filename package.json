@@ -48,11 +48,11 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "@openzeppelin/contracts": "^5.0.0",
-    "@openzeppelin/contracts-upgradeable": "^5.0.0",
+    "@openzeppelin/contracts": "5.4.0",
+    "@openzeppelin/contracts-upgradeable": "5.4.0",
     "@quai/hardhat-deploy-metadata": "^1.0.8",
     "@quai/quais-upgrades": "^3.8.14",
     "dotenv": "^16.4.5",
-    "quais": "^1.0.0-alpha.53"
+    "quais": "1.0.0-alpha.53"
   }
 }

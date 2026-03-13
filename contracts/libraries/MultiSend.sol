@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-only
-pragma solidity ^0.8.20;
+pragma solidity 0.8.22; // locked to match production compiler version
 
 /**
  * @title MultiSend - Allows batched transactions via delegatecall
@@ -66,7 +66,9 @@ contract MultiSend {
                 }
 
                 if eq(success, 0) {
-                    revert(0, 0)
+                    // L-3: Propagate revert data from failed sub-transaction for debuggability
+                    returndatacopy(0, 0, returndatasize())
+                    revert(0, returndatasize())
                 }
 
                 // Move to next transaction

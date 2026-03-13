@@ -129,7 +129,7 @@ to the shared QuaiVault implementation.
 
 | Contract | Purpose |
 |---|---|
-| **SocialRecoveryModule.sol** | Guardian-based wallet recovery with configurable threshold and recovery period |
+| **SocialRecoveryModule.sol** | Guardian-based wallet recovery with configurable threshold, recovery period, and expiration |
 
 Modules interact with QuaiVault via the Zodiac IAvatar interface (`execTransactionFromModule`).
 Module enablement requires multisig consensus (self-call through the vault).
@@ -214,7 +214,7 @@ Two audit rounds completed. All findings addressed:
 - Round 1: Critical, High, Medium, and Low severity findings — all fixed
 - Round 2: Verification of Round 1 fixes + new findings — all fixed
 
-266 unit tests + 53 E2E on-chain tests covering all audit fixes.
+266 unit tests + 49 E2E on-chain tests covering all audit fixes.
 
 See [SECURITY_GUIDE.md](SECURITY_GUIDE.md) for a detailed threat model, attack vector
 analysis, and operational security recommendations for wallet owners.

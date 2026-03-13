@@ -21,6 +21,10 @@ contract QuaiVaultFactory {
     error WalletAlreadyRegistered();
     error CallerIsNotAnOwner();
     error InvalidWalletImplementation();
+    error ExecutionDelayTooLong();      // L-1: minExecutionDelay exceeds MAX_EXECUTION_DELAY
+
+    /// @notice Maximum allowed minExecutionDelay (30 days) to prevent accidental wallet bricking (L-1)
+    uint32 public constant MAX_EXECUTION_DELAY = 30 days;
 
     /// @notice Address of the QuaiVault implementation contract
     /// @dev Immutable for security - prevents factory from being used to deploy with malicious implementation
@@ -57,15 +61,17 @@ contract QuaiVaultFactory {
      * @notice L-6: Validate owners array before deploying proxy — avoids burning deploy gas
      *         on inputs that initialize() would reject.
      */
-    function _validateOwners(address[] memory owners, uint256 threshold) internal pure {
+    function _validateOwners(address[] calldata owners, uint256 threshold) internal pure {
         if (owners.length == 0) revert OwnersRequired();
-        if (owners.length > 20) revert TooManyOwners(); // mirrors QuaiVault.MAX_OWNERS
+        if (owners.length > 20) revert TooManyOwners(); // MUST match QuaiVault.MAX_OWNERS — update both if changed
         if (threshold == 0 || threshold > owners.length) revert InvalidThreshold();
-        for (uint256 i = 0; i < owners.length; i++) {
+        for (uint256 i = 0; i < owners.length;) {
             if (owners[i] == address(0)) revert InvalidOwnerAddress();
-            for (uint256 j = i + 1; j < owners.length; j++) {
+            for (uint256 j = i + 1; j < owners.length;) {
                 if (owners[i] == owners[j]) revert DuplicateOwner();
+                unchecked { j++; }
             }
+            unchecked { i++; }
         }
     }
 
@@ -77,7 +83,7 @@ contract QuaiVaultFactory {
      * @return wallet Address of the created wallet
      */
     function createWallet(
-        address[] memory owners,
+        address[] calldata owners,
         uint256 threshold,
         bytes32 salt
     ) external returns (address wallet) {
@@ -111,12 +117,13 @@ contract QuaiVaultFactory {
      * @return wallet Address of the created wallet
      */
     function createWallet(
-        address[] memory owners,
+        address[] calldata owners,
         uint256 threshold,
         bytes32 salt,
         uint32 minExecutionDelay
     ) external returns (address wallet) {
         _validateOwners(owners, threshold);
+        if (minExecutionDelay > MAX_EXECUTION_DELAY) revert ExecutionDelayTooLong(); // L-1
 
         // Encode initialize call for the constructor's delegatecall
         bytes memory initData = abi.encodeCall(
@@ -149,7 +156,7 @@ contract QuaiVaultFactory {
     function predictWalletAddress(
         address deployer,
         bytes32 salt,
-        address[] memory owners,
+        address[] calldata owners,
         uint256 threshold,
         uint32 minExecutionDelay
     ) external view returns (address) {

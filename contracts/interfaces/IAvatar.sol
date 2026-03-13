@@ -106,7 +106,7 @@ interface IAvatar {
     function execTransactionFromModule(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         Enum.Operation operation
     ) external returns (bool success);
 
@@ -124,7 +124,7 @@ interface IAvatar {
     function execTransactionFromModuleReturnData(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         Enum.Operation operation
     ) external returns (bool success, bytes memory returnData);
 }
@@ -175,6 +175,6 @@ interface ISimpleModuleExecutor {
     function execTransactionFromModule(
         address to,
         uint256 value,
-        bytes memory data
+        bytes calldata data
     ) external returns (bool success);
 }

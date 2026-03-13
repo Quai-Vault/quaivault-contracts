@@ -825,4 +825,64 @@ describe("SocialRecoveryModule", function () {
       expect(executedRecovery.executed).to.be.true;
     });
   });
+
+  // ==================== M-1: Stale expired entries blocking new recovery ====================
+
+  describe("M-1: Stale expired entries cleanup in setupRecovery", function () {
+    it("should allow setupRecovery after all pending recoveries expire (cleans stale entries)", async function () {
+      const guardians = [guardian1.address, guardian2.address, guardian3.address];
+      await setupRecoveryViaMultisig(guardians, 2, RECOVERY_PERIOD);
+
+      const walletAddr = await wallet.getAddress();
+
+      // Fill pendingRecoveryHashes with MAX_GUARDIANS (20) expired recoveries
+      // Use guardian1 to initiate all of them
+      const recoveryHashes: string[] = [];
+      for (let i = 0; i < 20; i++) {
+        const newOwners = [guardian1.address, guardian2.address];
+        const tx = await module.connect(guardian1).initiateRecovery(walletAddr, newOwners, 2);
+        const receipt = await tx.wait();
+        const event = receipt?.logs.find((log) => {
+          try {
+            return module.interface.parseLog(log as any)?.name === "RecoveryInitiated";
+          } catch {
+            return false;
+          }
+        });
+        const parsed = module.interface.parseLog(event as any);
+        recoveryHashes.push(parsed!.args.recoveryHash);
+      }
+
+      // Verify we're at MAX_GUARDIANS pending
+      const pending = await module.getPendingRecoveryHashes(walletAddr);
+      expect(pending.length).to.equal(20);
+
+      // Trying to initiate another should fail (TooManyPendingRecoveries)
+      await expect(
+        module.connect(guardian1).initiateRecovery(walletAddr, [guardian1.address], 1)
+      ).to.be.revertedWithCustomError(module, "TooManyPendingRecoveries");
+
+      // Fast-forward past expiration (recoveryPeriod * 2 = execution wait + execution window)
+      await time.increase(RECOVERY_PERIOD * 2 + 1);
+
+      // hasPendingRecoveries should return false (all expired)
+      expect(await module.hasPendingRecoveries(walletAddr)).to.be.false;
+
+      // setupRecovery should succeed and clean up stale entries (M-1 fix)
+      // Reconfigure with same guardians
+      await setupRecoveryViaMultisig(guardians, 2, RECOVERY_PERIOD);
+
+      // Verify stale entries were cleaned up
+      const pendingAfter = await module.getPendingRecoveryHashes(walletAddr);
+      expect(pendingAfter.length).to.equal(0);
+
+      // Now initiateRecovery should work again
+      const tx = await module.connect(guardian1).initiateRecovery(walletAddr, [guardian1.address, guardian2.address], 2);
+      const receipt = await tx.wait();
+      expect(receipt?.status).to.equal(1);
+
+      const pendingFinal = await module.getPendingRecoveryHashes(walletAddr);
+      expect(pendingFinal.length).to.equal(1);
+    });
+  });
 });

@@ -74,18 +74,24 @@ const RETRY_DELAY_MS = 2000;
 /**
  * Check if an error is a transient RPC error that should be retried.
  * Quai Network intermittently fails with access list creation errors,
- * missing revert data, and spurious CALL_EXCEPTION on valid transactions.
+ * missing revert data, spurious CALL_EXCEPTION on valid transactions,
+ * and replacement-underpriced when a prior tx is still pending in the mempool.
  */
 function isTransientRpcError(err: Error & { code?: string }): boolean {
   return (
     err.message?.includes("Access list creation failed") ||
     err.message?.includes("missing revert data") ||
-    err.code === "CALL_EXCEPTION"
+    err.message?.includes("replacement fee too low") ||
+    err.message?.includes("replacement transaction underpriced") ||
+    err.code === "CALL_EXCEPTION" ||
+    err.code === "REPLACEMENT_UNDERPRICED"
   );
 }
 
 /**
  * Retry wrapper for operations that may fail due to transient Quai RPC errors.
+ * Uses exponential backoff for replacement-underpriced errors (pending tx needs
+ * time to mine before the next tx can use the same nonce).
  */
 async function withRetry<T>(
   operation: () => Promise<T>,
@@ -103,11 +109,15 @@ async function withRetry<T>(
       lastError = err;
 
       if (isTransientRpcError(err)) {
+        // Use longer delay for replacement-underpriced (pending tx needs to mine)
+        const isReplacement = err.code === "REPLACEMENT_UNDERPRICED" ||
+          err.message?.includes("replacement");
+        const delay = isReplacement ? retryDelay * attempt * 2 : retryDelay;
         console.log(
           `    [${operationName}] Transient error (attempt ${attempt}/${maxRetries}): ${err.code || err.message?.substring(0, 80)}`
         );
         if (attempt < maxRetries) {
-          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
         }
       }
@@ -848,13 +858,16 @@ describe("E2E On-Chain Transaction Lifecycle (Orchard Testnet)", function () {
 
     it("should use per-tx requestedDelay when greater than vault floor", async function () {
       const longerDelay = TIMELOCK_DELAY * 2;
-      const tx = await timelockWallet
-        .connect(owner1)
-        ["proposeTransaction(address,uint256,bytes,uint48,uint32)"](
-          owner2.address, 0, "0x", 0, longerDelay
-        );
-      const receipt = await waitForTx(tx, "propose with longer delay");
-      const txHash = parseTxHash(walletIface, receipt);
+      const txHash = await withRetry(async () => {
+        await warmup();
+        const tx = await timelockWallet
+          .connect(owner1)
+          ["proposeTransaction(address,uint256,bytes,uint48,uint32)"](
+            owner2.address, 0, "0x", 0, longerDelay
+          );
+        const receipt = await waitForTx(tx, "propose with longer delay");
+        return parseTxHash(walletIface, receipt);
+      }, "proposeWithLongerDelay");
 
       const txData = await timelockWallet.getTransaction(txHash);
       expect(Number(txData.executionDelay)).to.equal(longerDelay);
@@ -873,13 +886,16 @@ describe("E2E On-Chain Transaction Lifecycle (Orchard Testnet)", function () {
       const now = Math.floor(Date.now() / 1000);
       const expiration = now + EXPIRATION_WINDOW;
 
-      const tx = await wallet
-        .connect(owner1)
-        ["proposeTransaction(address,uint256,bytes,uint48)"](
-          owner2.address, 0, "0x", expiration
-        );
-      const receipt = await waitForTx(tx, "propose with expiration");
-      const txHash = parseTxHash(walletIface, receipt);
+      const txHash = await withRetry(async () => {
+        await warmup();
+        const tx = await wallet
+          .connect(owner1)
+          ["proposeTransaction(address,uint256,bytes,uint48)"](
+            owner2.address, 0, "0x", expiration
+          );
+        const receipt = await waitForTx(tx, "propose with expiration");
+        return parseTxHash(walletIface, receipt);
+      }, "proposeWithExpiration");
       await approveN(wallet, txHash, [owner1, owner2], THRESHOLD);
 
       // Wait past expiration
@@ -898,13 +914,16 @@ describe("E2E On-Chain Transaction Lifecycle (Orchard Testnet)", function () {
       const now = Math.floor(Date.now() / 1000);
       const expiration = now + EXPIRATION_WINDOW;
 
-      const tx = await wallet
-        .connect(owner1)
-        ["proposeTransaction(address,uint256,bytes,uint48)"](
-          owner2.address, quais.parseQuai("0.01"), "0x", expiration
-        );
-      const receipt = await waitForTx(tx, "propose with expiration");
-      const txHash = parseTxHash(walletIface, receipt);
+      const txHash = await withRetry(async () => {
+        await warmup();
+        const tx = await wallet
+          .connect(owner1)
+          ["proposeTransaction(address,uint256,bytes,uint48)"](
+            owner2.address, quais.parseQuai("0.01"), "0x", expiration
+          );
+        const receipt = await waitForTx(tx, "propose with expiration");
+        return parseTxHash(walletIface, receipt);
+      }, "proposeWithExpiration");
       await approveN(wallet, txHash, [owner1, owner2], THRESHOLD);
 
       await waitSeconds(EXPIRATION_WINDOW + WAIT_MARGIN, "expiration");
@@ -1236,7 +1255,7 @@ describe("E2E On-Chain Transaction Lifecycle (Orchard Testnet)", function () {
       expect(await wallet.isModuleEnabled(moduleAddr)).to.be.true;
 
       // Event assertion — ModuleEnabled
-      expectEvent(enableReceipt, "ModuleEnabled", [walletIface]);
+      expectEvent(enableReceipt, "EnabledModule", [walletIface]);
 
       // Execute QUAI transfer via module (4-param)
       const balanceBefore = await provider.getBalance(owner3.address);
@@ -1269,7 +1288,7 @@ describe("E2E On-Chain Transaction Lifecycle (Orchard Testnet)", function () {
       expect(await wallet.isModuleEnabled(moduleAddr)).to.be.false;
 
       // Event assertion — ModuleDisabled
-      expectEvent(disableReceipt, "ModuleDisabled", [walletIface]);
+      expectEvent(disableReceipt, "DisabledModule", [walletIface]);
     });
 
     it("module can call addOwner via execTransactionFromModule", async function () {

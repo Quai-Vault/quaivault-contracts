@@ -382,6 +382,8 @@ function createWallet(address[] memory owners, uint256 threshold,
     bytes32 salt) external returns (address);
 
 // Full: creates vault with non-zero minExecutionDelay from deployment
+// minExecutionDelay must be <= MAX_EXECUTION_DELAY (30 days / 2,592,000 seconds)
+// Reverts with ExecutionDelayTooLong() if exceeded
 function createWallet(address[] memory owners, uint256 threshold,
     bytes32 salt, uint32 minExecutionDelay) external returns (address);
 
@@ -393,6 +395,10 @@ function predictWalletAddress(address deployer, bytes32 salt,
 // initialize() gains corresponding parameter
 function initialize(address[] memory owners, uint256 threshold,
     uint32 minExecutionDelay) external initializer;
+
+// Factory constants and errors
+uint32 public constant MAX_EXECUTION_DELAY = 30 days; // 2,592,000 seconds
+error ExecutionDelayTooLong();
 ```
 
 ---

@@ -1419,6 +1419,143 @@ describe("QuaiVault", function () {
     });
   });
 
+  // ==================== Reentrancy Attack ====================
+
+  describe("Reentrancy Attack", function () {
+    it("should block reentrancy via malicious callback contract", async function () {
+      // Deploy attacker contract that tries to re-enter executeTransaction on receive
+      const AttackerFactory = await ethers.getContractFactory("ReentrantAttacker");
+      const attacker = await AttackerFactory.deploy(await wallet.getAddress());
+      await attacker.waitForDeployment();
+      const attackerAddr = await attacker.getAddress();
+
+      // Propose two transactions: one sending ETH to attacker, one sending ETH to nonOwner
+      const tx1 = await wallet
+        .connect(owner1)
+        .proposeTransaction(attackerAddr, ethers.parseEther("0.1"), "0x");
+      const txHash1 = await getTxHash(wallet, tx1);
+
+      const tx2 = await wallet
+        .connect(owner1)
+        .proposeTransaction(nonOwner.address, ethers.parseEther("0.1"), "0x");
+      const txHash2 = await getTxHash(wallet, tx2);
+
+      // Approve both
+      await wallet.connect(owner1).approveTransaction(txHash1);
+      await wallet.connect(owner2).approveTransaction(txHash1);
+      await wallet.connect(owner1).approveTransaction(txHash2);
+      await wallet.connect(owner2).approveTransaction(txHash2);
+
+      // Tell attacker to re-enter with txHash2 when it receives ETH from txHash1
+      await attacker.setAttackHash(txHash2);
+
+      // Execute txHash1 — sends ETH to attacker, which triggers receive() -> executeTransaction(txHash2)
+      // The nonReentrant guard should block the reentrant call
+      await wallet.connect(owner1).executeTransaction(txHash1);
+
+      // Attacker attempted the reentrancy but it should have failed
+      expect(await attacker.attackAttempted()).to.be.true;
+      expect(await attacker.attackSucceeded()).to.be.false;
+
+      // txHash2 should NOT have been executed (reentrancy blocked)
+      const tx2Data = await wallet.getTransaction(txHash2);
+      expect(tx2Data.executed).to.be.false;
+
+      // txHash2 can still be executed normally after txHash1 completes
+      await expect(
+        wallet.connect(owner1).executeTransaction(txHash2)
+      ).to.emit(wallet, "TransactionExecuted");
+    });
+  });
+
+  // ==================== 1-of-1 Wallet Lifecycle ====================
+
+  describe("1-of-1 Wallet Lifecycle", function () {
+    let soloWallet: QuaiVault;
+    let soloOwner: SignerWithAddress;
+
+    beforeEach(async function () {
+      soloOwner = owner1;
+      soloWallet = await deployWalletViaFactory(
+        factory,
+        [soloOwner.address],
+        1,
+        owner1
+      );
+
+      // Fund it
+      await owner1.sendTransaction({
+        to: await soloWallet.getAddress(),
+        value: ethers.parseEther("5"),
+      });
+    });
+
+    it("should propose, approve, and execute in single-owner workflow", async function () {
+      const txHash = await proposeExternal(
+        soloWallet, soloOwner, nonOwner.address, ethers.parseEther("0.1")
+      );
+
+      // Single owner's approval meets threshold
+      await soloWallet.connect(soloOwner).approveTransaction(txHash);
+
+      await expect(
+        soloWallet.connect(soloOwner).executeTransaction(txHash)
+      ).to.emit(soloWallet, "TransactionExecuted");
+    });
+
+    it("should execute self-calls (addOwner, changeThreshold) with single approval", async function () {
+      // Add a second owner
+      const addData = soloWallet.interface.encodeFunctionData("addOwner", [owner2.address]);
+      await executeSelfCall(soloWallet, addData, [soloOwner], 1);
+      expect(await soloWallet.isOwner(owner2.address)).to.be.true;
+
+      // Change threshold to 2
+      const threshData = soloWallet.interface.encodeFunctionData("changeThreshold", [2]);
+      await executeSelfCall(soloWallet, threshData, [soloOwner], 1);
+      expect(await soloWallet.threshold()).to.equal(2);
+
+      // Now it's a 2-of-2, single approval should fail
+      const tx = await soloWallet.connect(soloOwner).proposeTransaction(
+        nonOwner.address, ethers.parseEther("0.01"), "0x"
+      );
+      const txHash = await getTxHash(soloWallet, tx);
+      await soloWallet.connect(soloOwner).approveTransaction(txHash);
+      await expect(
+        soloWallet.connect(soloOwner).executeTransaction(txHash)
+      ).to.be.revertedWithCustomError(soloWallet, "NotEnoughApprovals");
+    });
+
+    it("should handle cancellation in 1-of-1 wallet", async function () {
+      const txHash = await proposeExternal(
+        soloWallet, soloOwner, nonOwner.address, ethers.parseEther("0.1")
+      );
+      // Proposer can cancel before threshold
+      await soloWallet.connect(soloOwner).cancelTransaction(txHash);
+      const txData = await soloWallet.getTransaction(txHash);
+      expect(txData.cancelled).to.be.true;
+    });
+
+    it("should support module operations on 1-of-1 wallet", async function () {
+      // Deploy and enable a module
+      const MockModuleFactory = await ethers.getContractFactory("MockModule");
+      const soloWalletAddr = await soloWallet.getAddress();
+      const module = await MockModuleFactory.deploy(soloWalletAddr);
+      await module.waitForDeployment();
+      const moduleAddr = await module.getAddress();
+
+      const enableData = soloWallet.interface.encodeFunctionData("enableModule", [moduleAddr]);
+      await executeSelfCall(soloWallet, enableData, [soloOwner], 1);
+      expect(await soloWallet.isModuleEnabled(moduleAddr)).to.be.true;
+
+      // Module can execute on the 1-of-1 wallet
+      const result = await module.exec(
+        nonOwner.address, ethers.parseEther("0.01"), "0x", 0
+      );
+      const receipt = await result.wait();
+      expect(receipt?.status).to.equal(1);
+    });
+  });
+
   // ==================== Multi-Owner Scale ====================
 
   describe("Multi-Owner Scale", function () {
