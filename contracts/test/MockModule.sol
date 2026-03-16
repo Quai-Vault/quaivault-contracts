@@ -55,6 +55,34 @@ contract MockModule {
     }
 
     /**
+     * @notice Execute a transaction on the target wallet, bubbling up any revert
+     * @dev Unlike exec(), this reverts if the inner call reverts (for testing revert reasons)
+     */
+    function execStrict(
+        address to,
+        uint256 value,
+        bytes calldata data,
+        Enum.Operation operation
+    ) external returns (bool success) {
+        emit ExecCalled(to, value, data, operation);
+
+        (bool callSuccess, bytes memory returnData) = target.call(
+            abi.encodeWithSignature(
+                "execTransactionFromModule(address,uint256,bytes,uint8)",
+                to,
+                value,
+                data,
+                uint8(operation)
+            )
+        );
+
+        if (!callSuccess) {
+            assembly { revert(add(returnData, 32), mload(returnData)) }
+        }
+        success = true;
+    }
+
+    /**
      * @notice Execute a transaction on the target wallet (3-param legacy version)
      * @param to Destination address
      * @param value Amount to send

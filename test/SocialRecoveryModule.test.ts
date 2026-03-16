@@ -293,6 +293,29 @@ describe("SocialRecoveryModule", function () {
       ).to.be.revertedWithCustomError(module, "InvalidNewOwnerAddress");
     });
 
+    // BB-M-2/BB-L-3: SENTINEL_MODULES (address(1)) must not be a recovery owner
+    it("should revert InvalidNewOwnerAddress for SENTINEL address in newOwners (BB-M-2)", async function () {
+      const SENTINEL = "0x0000000000000000000000000000000000000001";
+      await expect(
+        module.connect(guardian1).initiateRecovery(
+          await wallet.getAddress(),
+          [SENTINEL, guardian2.address],
+          1
+        )
+      ).to.be.revertedWithCustomError(module, "InvalidNewOwnerAddress");
+    });
+
+    // BB-L-3: wallet address must not be a recovery owner
+    it("should revert InvalidNewOwnerAddress for wallet address in newOwners (BB-L-3)", async function () {
+      await expect(
+        module.connect(guardian1).initiateRecovery(
+          await wallet.getAddress(),
+          [await wallet.getAddress(), guardian2.address],
+          1
+        )
+      ).to.be.revertedWithCustomError(module, "InvalidNewOwnerAddress");
+    });
+
     // Audit: M-3
     it("should revert DuplicateNewOwner for repeated addresses in newOwners (M-3)", async function () {
       await expect(
@@ -518,17 +541,17 @@ describe("SocialRecoveryModule", function () {
       ).to.be.revertedWithCustomError(module, "NotApproved");
     });
 
-    it("should reject revocation on executed recovery", async function () {
+    it("should reject revocation on executed recovery (BB-R3-3: config cleared, guardian unrecognized)", async function () {
       // Approve and execute
       await module.connect(guardian1).approveRecovery(await wallet.getAddress(), recoveryHash);
       await module.connect(guardian2).approveRecovery(await wallet.getAddress(), recoveryHash);
       await time.increase(RECOVERY_PERIOD + 1);
       await module.connect(guardian1).executeRecovery(await wallet.getAddress(), recoveryHash);
 
-      // Try to revoke after execution
+      // Try to revoke after execution — config is cleared, so guardian is no longer recognized
       await expect(
         module.connect(guardian1).revokeRecoveryApproval(await wallet.getAddress(), recoveryHash)
-      ).to.be.revertedWithCustomError(module, "RecoveryAlreadyExecuted");
+      ).to.be.revertedWithCustomError(module, "NotAGuardian");
     });
 
     it("should prevent execution after approval count drops below threshold", async function () {
@@ -630,6 +653,27 @@ describe("SocialRecoveryModule", function () {
       const pendingHashes = await module.getPendingRecoveryHashes(await wallet.getAddress());
       expect(pendingHashes).to.not.include(recoveryHash);
       expect(await module.hasPendingRecoveries(await wallet.getAddress())).to.be.false;
+    });
+
+    it("should clear recoveryConfig after successful recovery (BB-R3-3)", async function () {
+      await time.increase(RECOVERY_PERIOD);
+      await module.connect(guardian3).executeRecovery(await wallet.getAddress(), recoveryHash);
+
+      // Guardian config should be wiped — new owners must reconfigure
+      const config = await module.getRecoveryConfig(await wallet.getAddress());
+      expect(config.guardians).to.have.length(0);
+      expect(config.threshold).to.equal(0);
+      expect(config.recoveryPeriod).to.equal(0);
+
+      // Old guardians should no longer be recognized
+      expect(await module.isGuardian(await wallet.getAddress(), guardian1.address)).to.be.false;
+      expect(await module.isGuardian(await wallet.getAddress(), guardian2.address)).to.be.false;
+      expect(await module.isGuardian(await wallet.getAddress(), guardian3.address)).to.be.false;
+
+      // Initiating a new recovery should fail with RecoveryNotConfigured
+      await expect(
+        module.connect(guardian1).initiateRecovery(await wallet.getAddress(), [guardian1.address], 1)
+      ).to.be.revertedWithCustomError(module, "RecoveryNotConfigured");
     });
 
     // CoverageGaps: module disabled rejection

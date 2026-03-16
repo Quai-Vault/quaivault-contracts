@@ -14,22 +14,25 @@ to correctly configure and maintain an ecosystem of external modules and guards.
 
 **Safe** is a composable stack. The core contract handles signature verification,
 execution, and gas refunds. Everything else — timelock, transaction guards, module
-guards, token callbacks, EIP-1271, message signing — is assembled from independent
-contracts that can be added, removed, or replaced. This gives integrators maximum
-flexibility but introduces configuration risk: security depends on correctly assembling
-and maintaining multiple contracts. Safe supports 4 signature types (ECDSA, eth_sign,
-approved hash, contract/EIP-1271), off-chain signature collection, and a built-in gas
-refund system for relayer reimbursement. v1.5.0 adds Module Guards for optional
-per-module access control.
+guards, DelegateCall restrictions, token callbacks, EIP-1271, message signing — is
+assembled from independent contracts that can be added, removed, or replaced. This gives
+integrators maximum flexibility but introduces configuration risk: security depends on
+correctly assembling and maintaining multiple contracts. Safe supports 4 signature types
+(ECDSA, eth_sign, approved hash, contract/EIP-1271), off-chain signature collection, and
+a built-in gas refund system for relayer reimbursement. v1.5.0 adds Module Guards for
+optional per-module access control. Following the Bybit hack, Safe released **Guardrail**
+(Aug 2025), an optional guard that restricts DelegateCall to an allowlist of approved
+contracts with time-delayed additions.
 
 **QuaiVault** is an integrated design. Timelock, expiration, cancellation, failure
-handling, and message signing are built into a single contract. Security properties
-are structural — they cannot be misconfigured because they are not independently
-configurable. The trade-off is less flexibility: no transaction guards, no gas refund
-system, no off-chain signatures. QuaiVault uses on-chain approvals (one tx per signer),
-hash-based transaction identification (no head-of-line blocking), and epoch-based
-approval invalidation (O(1) invalidation on owner removal). It natively supports approval revocation
-and message un-signing, which Safe does not.
+handling, DelegateCall hardening, and message signing are built into a single contract.
+Security properties are structural — they cannot be misconfigured because they are not
+independently configurable. The trade-off is less flexibility: no transaction guards, no
+gas refund system, no off-chain signatures. QuaiVault uses on-chain approvals (one tx per
+signer), hash-based transaction identification (no head-of-line blocking), and epoch-based
+approval invalidation (O(1) invalidation on owner removal). DelegateCall is blocked by
+default with a consensus-togglable flag and defense-in-depth implementation slot guarding.
+It natively supports approval revocation and message un-signing, which Safe does not.
 
 | | Safe v1.5.0 | QuaiVault |
 |---|---|---|
@@ -40,8 +43,10 @@ and message un-signing, which Safe does not.
 | **Failed calls** | Non-reverting, nonce consumed | Non-reverting, marked terminal |
 | **Gas refund** | Built-in (ETH/ERC-20) | None |
 | **Guards** | Transaction Guard + Module Guard | None (structural security) |
+| **DelegateCall hardening** | Opt-in guard (Guardrail, Aug 2025) | Native `delegatecallDisabled` flag (default: blocked) |
 | **Approval revocation** | Not supported | Native `revokeApproval` |
 | **Message un-signing** | Not supported | Native `unsignMessage` |
+| **Max owners** | Unlimited (gas-bounded) | 20 (enforced constant) |
 | **Ecosystem** | Mature (5+ years, $100B+) | Emerging (new, audited) |
 
 Both contracts share the Zodiac module interface (IAvatar) — modules are cross-compatible.
@@ -50,7 +55,8 @@ linked-list module storage with sentinel 0x1.
 
 ---
 
-Safe references in this document describe **v1.5.0** behavior (the latest release).
+Safe references in this document describe **v1.5.0** behavior (the latest release, July 2024).
+The repo has moved from `safe-global/safe-smart-account` to `safe-fndn/safe-smart-account`.
 Notable changes from v1.3.0 (the most widely deployed version): contract renaming
 (`GnosisSafe` → `Safe`, `GnosisSafeProxy` → `SafeProxy`), Module Guards (`IModuleGuard`),
 `ExtensibleFallbackHandler`, `checkSignatures` executor parameter, ERC-777 support,
@@ -59,6 +65,11 @@ virtual hooks (`onBeforeExecTransaction`, `onBeforeExecTransactionFromModule`), 
 replaced with gas-optimized assembly reverts (`revertWithError`), and `GS400` prevention of
 setting fallback handler to self. Where v1.5.0 introduced a feature not present in v1.3.0,
 it is noted.
+
+Post-v1.5.0 developments (not yet released): **Guardrail** (Aug 2025) — an optional Safe
+Guard that maintains a DelegateCall allowlist with time-delayed additions, created in
+response to the Bybit hack. **EIP-7702 support** — on the `main` branch but unreleased;
+allows `address(this)` as owner for delegated EOAs.
 
 ---
 
@@ -110,8 +121,8 @@ via the standard Zodiac IAvatar interface.
 | **Ordering** | Strict — nonce N must execute before N+1 | Unordered — any approved tx can execute independently |
 | **Queuing** | Single queue, head-of-line blocking | Parallel — multiple txs in-flight simultaneously |
 | **Replay protection** | Nonce increment (consumed before execution) | Hash uniqueness (monotonic nonce in hash preimage) |
-| **Operation types** | `Call` and `DelegateCall` | `Call` only for user txs; `DelegateCall` only via modules |
-| **Batching** | Via MultiSend library (DELEGATECALL) | Via MultiSend library (module DELEGATECALL) |
+| **Operation types** | `Call` and `DelegateCall` | `Call` only for user txs; `DelegateCall` only via modules (blocked by default — CR-1) |
+| **Batching** | Via MultiSend library (DELEGATECALL) | Via MultiSend library (module DELEGATECALL, requires `delegatecallDisabled=false`) |
 
 ### Execution model difference
 
@@ -311,7 +322,8 @@ for hash-based systems where there is no sequential nonce to invalidate.
 | **Access control** | `authorized` modifier (`msg.sender == address(this)`) | `onlySelf` modifier (same semantics) |
 | **Threshold coupling** | Owner add/remove functions take threshold as parameter — can change threshold atomically | Threshold changed via separate `changeThreshold` self-call |
 | **Owner storage** | Linked list — `prevOwner` required for remove/swap (caller must know list order) | Array — caller only provides the owner address (internal swap-and-pop) |
-| **Self as owner** | Explicitly blocked (`owner == address(this)` reverts with GS203) | Not explicitly checked — relies on operational discipline |
+| **Self as owner** | Explicitly blocked (`owner == address(this)` reverts with GS203; unreleased EIP-7702 branch allows it for delegated EOAs) | Explicitly blocked — `address(this)` and `SENTINEL_MODULES` (0x1) both revert with `InvalidOwnerAddress` |
+| **Max owners** | Unlimited (gas-bounded only) | `MAX_OWNERS = 20` (enforced constant — bounds gas for `_countValidApprovals`) |
 
 ---
 
@@ -339,7 +351,7 @@ interface IAvatar {
 | **Module limit** | Unlimited | MAX_MODULES = 50 |
 | **Module execution** | Bypasses threshold; optionally guarded via Module Guard (v1.5.0) | Modules are trusted, bypass all checks (no module guard) |
 | **Module Guard** | `IModuleGuard` — pre/post checks on module-initiated txs (v1.5.0) | Not supported — modules are fully trusted once enabled |
-| **DelegateCall via modules** | Supported | Supported (required for MultiSend batching) |
+| **DelegateCall via modules** | Supported; optionally restricted via Guardrail guard (allowlist + time-delay, Aug 2025) | Blocked by default (`delegatecallDisabled=true`); opt-in via consensus toggle. When enabled, BB-L-4 guards the ERC1967 implementation slot |
 | **Self-call prevention** | No — modules can target the Safe itself | No — modules can target the vault itself (same trust model as Safe) |
 | **3-param legacy** | `execTransactionFromModule(to, value, data)` — removed in v1.5.0 | Supported via ISimpleModuleExecutor |
 | **Module enablement** | `authorized` (self-call via `execTransaction`, requires threshold) | `onlySelf` (vault threshold) |
@@ -390,13 +402,51 @@ pre/post-execution hooks.
 
 ---
 
+## DelegateCall Hardening
+
+The Bybit hack (Feb 2025, $1.46B loss) exploited DelegateCall to overwrite the Safe proxy's
+implementation storage slot. Both projects have responded, but with fundamentally different
+approaches:
+
+| Property | Safe (Guardrail) | QuaiVault (CR-1 + BB-L-4) |
+|---|---|---|
+| **Approach** | Optional guard contract (allowlist + time-delay) | Native contract flag (`delegatecallDisabled`) + implementation slot guard |
+| **Default** | DelegateCall unrestricted (opt-in to Guardrail) | DelegateCall blocked by default (opt-in to allow) |
+| **Granularity** | Per-target allowlist (approve specific contracts for DelegateCall) | Binary on/off for all DelegateCall operations |
+| **Time-delay** | Configurable delay on allowlist additions | N/A — toggle is immediate via consensus |
+| **Removability** | Guard can be removed by owners (`setGuard(address(0))`) | Flag can be toggled but the mechanism itself cannot be removed |
+| **Implementation slot protection** | No dedicated protection (relies on Guardrail allowlist) | BB-L-4: pre/post snapshot of ERC1967 slot around every DelegateCall; reverts with `ImplementationSlotTampered` if changed |
+| **Release** | Aug 2025 (separate contract, not in core Safe) | Built into core contract |
+| **Deployment** | Requires separate deployment + `setGuard` call | Configured at wallet creation (`initialize` 4th param) |
+
+### Architectural difference
+
+**Safe's Guardrail** is a composable guard — consistent with Safe's design philosophy. It
+maintains an allowlist of contracts approved for DelegateCall, with a configurable time-delay
+for additions (preventing instant allowlisting of malicious targets). Removals are immediate.
+It covers both owner-signed and module-initiated transactions. As a guard, it can be removed
+by owners at any time.
+
+**QuaiVault's CR-1** is a native contract feature — consistent with QuaiVault's integrated
+philosophy. When `delegatecallDisabled=true` (the default), all DelegateCall operations via
+modules revert with `DelegateCallDisabled()`. When DelegateCall is allowed, BB-L-4 provides
+defense-in-depth by snapshotting the ERC1967 implementation slot before/after every
+DelegateCall and reverting if the slot changed. This catches the specific Bybit attack
+vector (implementation slot overwrite) even when DelegateCall is enabled.
+
+The key trade-off: Safe's Guardrail offers per-target granularity (allow MultiSend but block
+unknown contracts), while QuaiVault's CR-1 is all-or-nothing but cannot be accidentally
+misconfigured or removed.
+
+---
+
 ## Proxy Pattern
 
 | Property | Safe | QuaiVault |
 |---|---|---|
 | **Pattern** | Custom proxy (`SafeProxy`) — singleton stored in storage slot 0 | ERC1967 constructor proxy |
 | **Proxy bytecode** | Minimal — all-assembly `fallback()`, handles `masterCopy()` inline | OpenZeppelin ERC1967Proxy |
-| **Initialization** | `setup(owners, threshold, to, data, fallbackHandler, paymentToken, payment, paymentReceiver)` — 8 params, optional setup DELEGATECALL + deployment payment | `initialize(owners, threshold, minExecutionDelay)` — 3 params |
+| **Initialization** | `setup(owners, threshold, to, data, fallbackHandler, paymentToken, payment, paymentReceiver)` — 8 params, optional setup DELEGATECALL + deployment payment | `initialize(owners, threshold, minExecutionDelay, delegatecallDisabled)` — 4 params |
 | **Setup DELEGATECALL** | Optional `to.delegatecall(data)` during setup (enables `SafeToL2Setup`, module pre-configuration) | Not supported |
 | **Deployment payment** | Built-in — can pay deployer in ETH or ERC-20 during setup | Not supported |
 | **Upgradeability** | Non-upgradeable by default (no `changeMasterCopy`); migration possible via `SafeMigration` DELEGATECALL to overwrite slot 0 | Non-upgradeable (by design — no write path to implementation slot) |
@@ -404,7 +454,7 @@ pre/post-execution hooks.
 | **CREATE2 prediction** | `bytecodeHash = keccak256(proxyCreationCode + singleton)`, `salt = keccak256(keccak256(initializer), saltNonce)` — varies per wallet config | `keccak256(creationCode + constructorArgs)` — varies per wallet config |
 | **Chain-specific deployment** | `createChainSpecificProxyWithNonce` — includes `chainId` in salt (v1.5.0) | Not applicable — Quai Network is a single L1 |
 | **On-chain address prediction** | Removed in v1.5.0 — must compute off-chain using `proxyCreationCode()` | `predictWalletAddress` on factory |
-| **Factory functions** | `createProxyWithNonce`, `createProxyWithNonceL2`, `createChainSpecificProxyWithNonce`, `createChainSpecificProxyWithNonceL2` | `createWallet` (two overloads: 3-param and 4-param with `minExecutionDelay`) |
+| **Factory functions** | `createProxyWithNonce`, `createProxyWithNonceL2`, `createChainSpecificProxyWithNonce`, `createChainSpecificProxyWithNonceL2` | `createWallet` (three overloads: 3-param, 4-param with `minExecutionDelay`, 5-param with `delegatecallDisabled`) |
 
 ### Safe setup complexity
 
@@ -550,6 +600,8 @@ Events that indexers/frontends must handle:
 | Delay changed | N/A (Delay Modifier event) | `MinExecutionDelayChanged(oldDelay, newDelay)` |
 | Message signed | `SignMsg(msgHash)` (via SignMessageLib) | `MessageSigned(msgHash, data)` |
 | Message unsigned | N/A | `MessageUnsigned(msgHash, data)` |
+| DelegateCall toggled | N/A (Guardrail has own events) | `DelegatecallDisabledChanged(disabled)` |
+| Recovery config cleared | N/A | `RecoveryConfigCleared(wallet)` (SocialRecoveryModule) |
 
 **SafeL2 events** (v1.5.0): The `SafeL2` contract overrides the virtual hooks to emit
 additional events with full calldata:
@@ -576,14 +628,16 @@ means more on-chain gas for the approval process.
 | **Timelock** | Opt-in module (can be removed) | Native (cannot be removed, only adjusted) |
 | **Nonce model** | Sequential (head-of-line blocking) | Hash-based (parallel execution) |
 | **Failed call handling** | Non-reverting — emits `ExecutionFailure`, nonce consumed | Non-reverting — emits `TransactionFailed`, marked terminal |
+| **DelegateCall hardening** | Guardrail guard (opt-in allowlist + time-delay, Aug 2025) | Native `delegatecallDisabled` (blocked by default) + BB-L-4 impl slot guard |
 | **Module trust model** | Optional Module Guard (v1.5.0) for pre/post validation | Fully trusted — no module guard |
 | **Guard system** | Transaction Guard + Module Guard — arbitrary pre/post hooks | None — security is structural, not policy-based |
+| **Max owners** | Unlimited | 20 (bounds gas for approval counting) |
 | **Gas refund** | Built-in (ETH or ERC-20 relayer reimbursement) | None — each signer pays their own gas |
 | **Signature model** | 4 types (ECDSA, eth_sign, approved hash, contract) — off-chain primary | On-chain approvals only |
 | **Approval invalidation** | Signature-based (no on-chain state to invalidate) | Epoch-based (O(1) invalidation on owner removal) |
 | **Clock gaming** | N/A (no native clock) | Prevented by permanent `approvedAt` |
 | **Message un-signing** | Not supported | Native `unsignMessage` |
-| **Battle-testing** | 5+ years, securing $100B+ | New — audited, 266 unit tests + 53 E2E on-chain tests |
+| **Battle-testing** | 5+ years, securing $100B+ | New — audited (4 rounds, 47+ attack vectors), 345 unit tests + 53 E2E on-chain tests |
 | **Ecosystem** | Mature (Safe Apps, Transaction Service, UI, Guard/Module marketplace) | Emerging (custom indexer + frontend required) |
 
 ---
@@ -620,7 +674,13 @@ For teams considering a move from Safe to QuaiVault:
    as operational procedures or custom modules. QuaiVault's timelock and expiration
    cover some guard use cases structurally.
 
-9. **Owner management**: Safe's `swapOwner` (atomic replace) and threshold-coupled
+9. **DelegateCall**: Safe allows unrestricted DelegateCall by default; Guardrail is opt-in.
+   QuaiVault blocks DelegateCall by default. If your modules require DelegateCall (e.g.,
+   MultiSend batching), deploy with `delegatecallDisabled=false` or toggle it post-deploy
+   via consensus. The BB-L-4 implementation slot guard provides defense-in-depth when
+   DelegateCall is enabled.
+
+10. **Owner management**: Safe's `swapOwner` (atomic replace) and threshold-coupled
    `addOwnerWithThreshold`/`removeOwner` must be replaced with separate self-call
    transactions for each operation.
 
@@ -665,6 +725,17 @@ security properties hold regardless of operator sophistication.
   QuaiVault transactions carry a deadline — after expiration, anyone can call
   `expireTransaction` to finalize them, preventing stale approvals from being executed
   months later.
+
+- **DelegateCall blocked by default.** Safe allows unrestricted DelegateCall; its Guardrail
+  guard (Aug 2025) is opt-in and removable. QuaiVault blocks all module DelegateCall
+  operations by default (`delegatecallDisabled=true`). When DelegateCall is enabled, the
+  BB-L-4 implementation slot guard provides defense-in-depth by catching the specific
+  Bybit attack vector. The flag cannot be removed from the contract — only toggled by
+  consensus.
+
+- **Bounded owner count.** Safe has no owner limit — gas costs for signature verification
+  and owner iteration grow unboundedly. QuaiVault enforces `MAX_OWNERS = 20`, guaranteeing
+  that `_countValidApprovals` costs at most ~126,000 gas regardless of configuration.
 
 **What QuaiVault trades away:**
 

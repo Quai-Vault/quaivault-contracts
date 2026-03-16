@@ -11,7 +11,8 @@ Zodiac IAvatar compatibility for Quai Network.
 - **Hash-based transactions** (unordered, no head-of-line blocking)
 - **Epoch-based approval invalidation** (owner removal atomically invalidates all their approvals)
 - **Option B failure handling** (external call failures are terminal, never revert)
-- **Zodiac IAvatar module system** (linked list, DelegateCall support, MultiSend batching)
+- **DelegateCall hardening** (CR-1: `delegatecallDisabled` flag, default on, blocks module DelegateCall)
+- **Zodiac IAvatar module system** (linked list, optional DelegateCall support, MultiSend batching)
 - **Social recovery** via guardian-based module
 - **EIP-1271** contract signatures (mapping-based pre-approval)
 - **ERC-721 / ERC-1155** token receivers (native, not via fallback handler)
@@ -51,7 +52,7 @@ npm run compile
 ### Unit Tests (Hardhat, local network)
 
 ```bash
-npm test            # 266 tests across 7 test files
+npm test            # 345 tests across 7 test files
 npm run test:gas    # same tests with gas reporting
 npm run test:coverage
 ```
@@ -63,7 +64,7 @@ Requires deployed contracts, funded wallets, and `.env.e2e` configuration:
 ```bash
 npm run deploy:cyprus1:mock   # deploy all contracts + test mocks
 npm run update-env            # sync addresses to .env and .env.e2e
-npm run test:e2e              # 49 on-chain tests (~47 min)
+npm run test:e2e              # 53 on-chain tests (~47 min)
 ```
 
 See `.env.e2e.example` for required configuration.
@@ -157,7 +158,7 @@ design document covering:
 
 ## Events
 
-QuaiVault emits 19 events covering the complete transaction lifecycle:
+QuaiVault emits 20 events covering the complete transaction lifecycle:
 
 | Event | When |
 |---|---|
@@ -172,12 +173,13 @@ QuaiVault emits 19 events covering the complete transaction lifecycle:
 | `OwnerAdded` | Owner added via multisig self-call |
 | `OwnerRemoved` | Owner removed via multisig self-call |
 | `ThresholdChanged` | Threshold changed via multisig self-call |
-| `ModuleEnabled` | Module enabled via multisig self-call |
-| `ModuleDisabled` | Module disabled via multisig self-call |
+| `EnabledModule` | Module enabled via multisig self-call |
+| `DisabledModule` | Module disabled via multisig self-call |
 | `ExecutionFromModuleSuccess` | Module executed a transaction successfully |
 | `ExecutionFromModuleFailure` | Module-executed transaction failed |
 | `Received` | Plain QUAI received (via proxy or fallback) |
 | `MinExecutionDelayChanged` | Vault-level execution delay changed |
+| `DelegatecallDisabledChanged` | CR-1: DelegateCall security flag toggled via multisig self-call |
 | `MessageSigned` | EIP-1271 message pre-approved via multisig |
 | `MessageUnsigned` | EIP-1271 message approval revoked via multisig |
 
@@ -200,21 +202,27 @@ QuaiVault emits 19 events covering the complete transaction lifecycle:
 | `onlySelf` | Requires `msg.sender == address(this)` (multisig consensus via self-call) |
 | `onlyModule` | Requires `isModuleEnabled(msg.sender)` |
 
-### DelegateCall Warning
+### DelegateCall Hardening (CR-1)
 
-The Zodiac `execTransactionFromModule` function supports DelegateCall operations,
-which execute code in the wallet's storage context. This is required for MultiSend
-batching but means enabled modules have full storage access. **Only enable trusted,
-audited modules.**
+Module DelegateCall is **disabled by default** via the `delegatecallDisabled` flag.
+When enabled, modules can only execute `Call` operations. This blocks the primary
+attack vector where a compromised module could use DelegateCall to modify vault storage.
+
+For vaults that require MultiSend batching (e.g., DAO governance with Baal),
+DelegateCall can be enabled at deploy time or toggled post-deploy via owner consensus
+(`setDelegatecallDisabled`). **Only disable this protection when DelegateCall is
+genuinely required, and only enable trusted, audited modules.**
 
 ### Audit Status
 
-Two audit rounds completed. All findings addressed:
+Four audit rounds completed. All findings addressed:
 
-- Round 1: Critical, High, Medium, and Low severity findings — all fixed
-- Round 2: Verification of Round 1 fixes + new findings — all fixed
+- Round 1 (BB): Critical, High, Medium, and Low severity findings — all fixed
+- Round 2 (BB): Verification of Round 1 fixes + new findings — all fixed
+- Round 3 (CR): DelegateCall hardening (CR-1), factory improvements — all fixed
+- Round 4 (SA): Final review — 0 Critical, 0 High, 0 Medium, 3 Low, 7 Informational
 
-266 unit tests + 49 E2E on-chain tests covering all audit fixes.
+345 unit tests + 53 E2E on-chain tests covering all audit fixes.
 
 See [SECURITY_GUIDE.md](SECURITY_GUIDE.md) for a detailed threat model, attack vector
 analysis, and operational security recommendations for wallet owners.

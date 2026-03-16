@@ -139,12 +139,13 @@ function mineSalt(
   implementationAddress: string,
   owners: string[],
   threshold: number,
-  minExecutionDelay: number = 0
+  minExecutionDelay: number = 0,
+  delegatecallDisabled: boolean = true
 ): { salt: string; expectedAddress: string } {
   // ERC1967 constructor proxy creation code
   const quaiVaultIface = new quais.Interface(QuaiVaultJson.abi);
   const initData = quaiVaultIface.encodeFunctionData("initialize", [
-    owners, threshold, minExecutionDelay,
+    owners, threshold, minExecutionDelay, delegatecallDisabled,
   ]);
   const abiCoder = quais.AbiCoder.defaultAbiCoder();
   const constructorArgs = abiCoder.encode(
@@ -655,10 +656,15 @@ describe("E2E On-Chain Transaction Lifecycle (Orchard Testnet)", function () {
       expect(Number(await timelockWallet.minExecutionDelay())).to.equal(TIMELOCK_DELAY);
     });
 
+    it("wallets default to delegatecallDisabled=true (CR-1)", async function () {
+      expect(await wallet.delegatecallDisabled()).to.be.true;
+      expect(await timelockWallet.delegatecallDisabled()).to.be.true;
+    });
+
     it("wallet address matches CREATE2 prediction", async function () {
       const salt = quais.hexlify(quais.randomBytes(32));
       const predicted = await factory.predictWalletAddress(
-        owner1.address, salt, ownerAddresses, THRESHOLD, 0
+        owner1.address, salt, ownerAddresses, THRESHOLD, 0, true
       );
       expect(predicted).to.be.a("string");
       expect(predicted.length).to.equal(42);
@@ -1387,6 +1393,13 @@ describe("E2E On-Chain Transaction Lifecycle (Orchard Testnet)", function () {
         await enableModule(wallet, walletAddress, moduleAddr);
       }
 
+      // CR-1: Disable delegatecall guard to allow MultiSend DelegateCall
+      if (await wallet.delegatecallDisabled()) {
+        const disableDCData = walletIface.encodeFunctionData("setDelegatecallDisabled", [false]);
+        await executeSelfCall(wallet, walletAddress, disableDCData, [owner1, owner2, owner3], THRESHOLD);
+        expect(await wallet.delegatecallDisabled()).to.be.false;
+      }
+
       const amount1 = quais.parseQuai("0.01");
       const amount2 = quais.parseQuai("0.01");
 
@@ -1416,10 +1429,48 @@ describe("E2E On-Chain Transaction Lifecycle (Orchard Testnet)", function () {
       expect(balAfter1 - balBefore1).to.equal(amount1);
       expect(balAfter2 - balBefore2).to.equal(amount2);
 
+      // CR-1: Re-enable delegatecall guard
+      const enableDCData = walletIface.encodeFunctionData("setDelegatecallDisabled", [true]);
+      await executeSelfCall(wallet, walletAddress, enableDCData, [owner1, owner2, owner3], THRESHOLD);
+      expect(await wallet.delegatecallDisabled()).to.be.true;
+
       // Cleanup
       const SENTINEL = "0x0000000000000000000000000000000000000001";
       const disableData = walletIface.encodeFunctionData("disableModule", [SENTINEL, moduleAddr]);
       await executeSelfCall(wallet, walletAddress, disableData, [owner1, owner2, owner3], THRESHOLD);
+    });
+
+    it("should block MultiSend delegatecall when delegatecallDisabled=true (CR-1)", async function () {
+      const moduleAddr = await mockModule.getAddress();
+
+      await withRetry(async () => {
+        await warmup();
+        const setTargetTx = await mockModule.setTarget(walletAddress);
+        await waitForTx(setTargetTx, "setTarget");
+      }, "setTarget");
+
+      if (!(await wallet.isModuleEnabled(moduleAddr))) {
+        await enableModule(wallet, walletAddress, moduleAddr);
+      }
+
+      // Ensure delegatecall guard is ON
+      expect(await wallet.delegatecallDisabled()).to.be.true;
+
+      const packed = encodeMultiSendTx(0, guardian1.address, quais.parseQuai("0.01"), "0x");
+      const multiSendData = multiSendIface.encodeFunctionData("multiSend", [packed]);
+      const multiSendAddress = await multiSend.getAddress();
+
+      // DelegateCall (operation=1) should be blocked
+      // Use execStrict so the inner revert bubbles up (exec swallows reverts)
+      await expectRevert(
+        mockModule.execStrict(multiSendAddress, 0, multiSendData, 1),
+        "DelegateCallDisabled"
+      );
+
+      // Cleanup
+      const SENTINEL = "0x0000000000000000000000000000000000000001";
+      const cleanupData = walletIface.encodeFunctionData("disableModule", [SENTINEL, moduleAddr]);
+      await executeSelfCall(wallet, walletAddress, cleanupData, [owner1, owner2, owner3], THRESHOLD);
     });
   });
 

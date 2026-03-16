@@ -98,6 +98,12 @@ describe("ZodiacInterface", function () {
     return { txHash, executeTx };
   }
 
+  // Helper to allow delegatecall (disabled by default for security)
+  async function allowDelegatecall() {
+    const data = wallet.interface.encodeFunctionData("setDelegatecallDisabled", [false]);
+    await executeWalletSelfCall(data);
+  }
+
   describe("Module Linked List Management", function () {
     describe("enableModule", function () {
       it("should enable a module successfully", async function () {
@@ -424,6 +430,7 @@ describe("ZodiacInterface", function () {
       });
 
       it("should execute DelegateCall operation successfully", async function () {
+        await allowDelegatecall();
         // DelegateCall to MultiSend with empty transactions
         const multiSendData = multiSend.interface.encodeFunctionData("multiSend", ["0x"]);
 
@@ -575,6 +582,7 @@ describe("ZodiacInterface", function () {
     }
 
     it("should execute batched transactions via DelegateCall", async function () {
+      await allowDelegatecall();
       const amount = ethers.parseEther("0.5");
 
       // Encode two simple ETH transfers
@@ -602,6 +610,7 @@ describe("ZodiacInterface", function () {
     });
 
     it("should rollback all transactions if one fails in batch", async function () {
+      await allowDelegatecall();
       const amount = ethers.parseEther("0.5");
       const tooMuch = ethers.parseEther("1000.0");
 
@@ -720,6 +729,7 @@ describe("ZodiacInterface", function () {
 
   describe("Module Security", function () {
     it("should reject execTransactionFromModuleReturnData with DelegateCall to zero address", async function () {
+      await allowDelegatecall();
       // Enable a signer as a module to test
       const enableData = wallet.interface.encodeFunctionData("enableModule", [nonOwner.address]);
       await executeWalletSelfCall(enableData);
@@ -729,6 +739,30 @@ describe("ZodiacInterface", function () {
           ethers.ZeroAddress, 0, "0x", 1 // DelegateCall
         )
       ).to.be.revertedWithCustomError(wallet, "InvalidDestinationAddress");
+    });
+
+    // BB-L-4: DelegateCall must not overwrite ERC1967 implementation slot
+    it("should revert ImplementationSlotTampered on DelegateCall that writes ERC1967 slot (BB-L-4)", async function () {
+      await allowDelegatecall();
+      // Deploy slot tamper contract
+      const SlotTamper = await ethers.getContractFactory("SlotTamper");
+      const tamper = await SlotTamper.deploy();
+      await tamper.waitForDeployment();
+
+      // Enable a signer as a module for direct call (bypasses MockModule's raw .call wrapper)
+      const enableData = wallet.interface.encodeFunctionData("enableModule", [nonOwner.address]);
+      await executeWalletSelfCall(enableData);
+
+      // Try DelegateCall to the tamper contract — should revert with ImplementationSlotTampered
+      const tamperData = tamper.interface.encodeFunctionData("tamperImplementationSlot");
+      await expect(
+        wallet.connect(nonOwner)["execTransactionFromModule(address,uint256,bytes,uint8)"](
+          await tamper.getAddress(),
+          0,
+          tamperData,
+          1 // DelegateCall
+        )
+      ).to.be.revertedWithCustomError(wallet, "ImplementationSlotTampered");
     });
 
     it("module can enable another module via execTransactionFromModule (Zodiac trust model)", async function () {
@@ -793,6 +827,77 @@ describe("ZodiacInterface", function () {
         await wallet.getAddress(), 0n, addNewData, 0
       );
       expect(await wallet.isOwner(newAddr)).to.be.true;
+    });
+
+    // CR-1: DelegateCall disabled by default
+    it("should default delegatecallDisabled to true", async function () {
+      expect(await wallet.delegatecallDisabled()).to.be.true;
+    });
+
+    it("should revert DelegateCallDisabled when delegatecall is blocked (CR-1)", async function () {
+      // Enable a signer as module
+      const enableData = wallet.interface.encodeFunctionData("enableModule", [nonOwner.address]);
+      await executeWalletSelfCall(enableData);
+
+      // DelegateCall should be blocked by default
+      const multiSendData = multiSend.interface.encodeFunctionData("multiSend", ["0x"]);
+      await expect(
+        wallet.connect(nonOwner)["execTransactionFromModule(address,uint256,bytes,uint8)"](
+          await multiSend.getAddress(), 0, multiSendData, 1
+        )
+      ).to.be.revertedWithCustomError(wallet, "DelegateCallDisabled");
+    });
+
+    it("should revert DelegateCallDisabled on execTransactionFromModuleReturnData (CR-1)", async function () {
+      const enableData = wallet.interface.encodeFunctionData("enableModule", [nonOwner.address]);
+      await executeWalletSelfCall(enableData);
+
+      await expect(
+        wallet.connect(nonOwner).execTransactionFromModuleReturnData(
+          await multiSend.getAddress(), 0, "0x", 1
+        )
+      ).to.be.revertedWithCustomError(wallet, "DelegateCallDisabled");
+    });
+
+    it("should allow DelegateCall after setDelegatecallDisabled(false) (CR-1)", async function () {
+      await allowDelegatecall();
+      expect(await wallet.delegatecallDisabled()).to.be.false;
+
+      // Enable module
+      const enableData = wallet.interface.encodeFunctionData("enableModule", [await mockModule.getAddress()]);
+      await executeWalletSelfCall(enableData);
+
+      // DelegateCall should now work
+      const multiSendData = multiSend.interface.encodeFunctionData("multiSend", ["0x"]);
+      await expect(
+        mockModule.exec(await multiSend.getAddress(), 0, multiSendData, 1)
+      ).to.emit(wallet, "ExecutionFromModuleSuccess");
+    });
+
+    it("should emit DelegatecallDisabledChanged event (CR-1)", async function () {
+      // Disable (set to false)
+      const disableData = wallet.interface.encodeFunctionData("setDelegatecallDisabled", [false]);
+      const { executeTx } = await executeWalletSelfCall(disableData);
+      await expect(executeTx).to.emit(wallet, "DelegatecallDisabledChanged").withArgs(false);
+
+      // Re-enable (set to true)
+      const enableData = wallet.interface.encodeFunctionData("setDelegatecallDisabled", [true]);
+      const { executeTx: executeTx2 } = await executeWalletSelfCall(enableData);
+      await expect(executeTx2).to.emit(wallet, "DelegatecallDisabledChanged").withArgs(true);
+    });
+
+    it("Call operations still work when delegatecall is disabled (CR-1)", async function () {
+      // delegatecallDisabled is true by default — Call should still work
+      const enableData = wallet.interface.encodeFunctionData("enableModule", [await mockModule.getAddress()]);
+      await executeWalletSelfCall(enableData);
+
+      const amount = ethers.parseEther("0.1");
+      const balanceBefore = await ethers.provider.getBalance(recipient.address);
+
+      await mockModule.exec(recipient.address, amount, "0x", 0); // Call
+
+      const balanceAfter = await ethers.provider.getBalance(recipient.address);
+      expect(balanceAfter - balanceBefore).to.equal(amount);
     });
   });
 });

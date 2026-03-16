@@ -174,6 +174,12 @@ contract SocialRecoveryModule is ReentrancyGuard {
         bytes32 indexed recoveryHash
     );
 
+    /// @notice Emitted when recovery configuration is cleared (after successful recovery execution)
+    /// @param wallet Address of the multisig wallet whose guardian configuration was deleted
+    event RecoveryConfigCleared(
+        address indexed wallet
+    );
+
     /**
      * @notice Set up recovery configuration
      * @param wallet Multisig wallet address
@@ -211,12 +217,22 @@ contract SocialRecoveryModule is ReentrancyGuard {
         // hasPendingRecoveries() returned false, so all remaining entries are stale.
         // Without this cleanup, 20 expired entries would permanently block initiateRecovery
         // (which checks pendingRecoveryHashes.length >= MAX_GUARDIANS).
+        // BB-L-2: Also clean up orphaned recoveryApprovals for gas refund. Must read the
+        // current guardians BEFORE the new config is written (line 232 below), since those
+        // are the guardians who made the approvals.
         bytes32[] storage staleHashes = pendingRecoveryHashes[wallet];
-        for (uint256 i = 0; i < staleHashes.length;) {
-            delete recoveries[wallet][staleHashes[i]];
-            unchecked { i++; }
+        if (staleHashes.length > 0) {
+            address[] storage currentGuardians = recoveryConfigs[wallet].guardians;
+            for (uint256 i = 0; i < staleHashes.length;) {
+                for (uint256 j = 0; j < currentGuardians.length;) {
+                    delete recoveryApprovals[wallet][staleHashes[i]][currentGuardians[j]];
+                    unchecked { j++; }
+                }
+                delete recoveries[wallet][staleHashes[i]];
+                unchecked { i++; }
+            }
+            delete pendingRecoveryHashes[wallet];
         }
-        delete pendingRecoveryHashes[wallet];
 
         // Validate guardians
         for (uint256 i = 0; i < guardians.length;) {
@@ -263,10 +279,13 @@ contract SocialRecoveryModule is ReentrancyGuard {
         if (pendingRecoveryHashes[wallet].length >= MAX_GUARDIANS) revert TooManyPendingRecoveries();
 
         // M-3: Validate newOwners for zero-addresses and duplicates.
-        // Without this, a malicious guardian could initiate a recovery that can never succeed
-        // (executeRecovery reverts), permanently blocking setupRecovery via hasPendingRecoveries.
+        // BB-M-2/BB-L-3: Also reject SENTINEL (0x1) and the wallet's own address.
+        // SENTINEL as owner creates a phantom who can never sign (bricking the wallet).
+        // Wallet address is rejected by QuaiVault._addOwner at execution time, but catching
+        // it here avoids wasting a pendingRecoveryHashes slot on an un-executable recovery.
         for (uint256 i = 0; i < newOwners.length;) {
-            if (newOwners[i] == address(0)) revert InvalidNewOwnerAddress();
+            if (newOwners[i] == address(0) || newOwners[i] == address(1) || newOwners[i] == wallet)
+                revert InvalidNewOwnerAddress();
             for (uint256 j = i + 1; j < newOwners.length;) {
                 if (newOwners[i] == newOwners[j]) revert DuplicateNewOwner();
                 unchecked { j++; }
@@ -472,6 +491,8 @@ contract SocialRecoveryModule is ReentrancyGuard {
             unchecked { i++; }
         }
         delete pendingRecoveryHashes[wallet];
+        delete recoveryConfigs[wallet]; // BB-R3-3: new owners must reconfigure guardians
+        emit RecoveryConfigCleared(wallet);
 
         emit RecoveryExecuted(wallet, recoveryHash);
     }

@@ -30,6 +30,11 @@ contract QuaiVaultFactory {
     /// @dev Immutable for security - prevents factory from being used to deploy with malicious implementation
     address public immutable implementation;
 
+    /// @notice Expected runtime codehash of QuaiVaultProxy instances (BB-L-1)
+    /// @dev Used by registerWallet to verify wallet bytecode via extcodehash (unforgeable EVM opcode).
+    ///      All QuaiVaultProxy instances share identical runtime bytecode (no immutables that vary per instance).
+    bytes32 public immutable proxyCodeHash;
+
     /// @notice Array of all deployed wallet addresses
     /// @dev Use getWalletCount() + deployedWallets(index) for paginated access, or event indexing at scale
     address[] public deployedWallets;
@@ -55,6 +60,9 @@ contract QuaiVaultFactory {
     constructor(address _implementation) {
         if (_implementation == address(0)) revert InvalidImplementationAddress();
         implementation = _implementation;
+        // BB-L-1: Compute expected proxy runtime codehash for registerWallet verification.
+        // QuaiVaultProxy has no immutables, so runtime bytecode is identical for all instances.
+        proxyCodeHash = keccak256(type(QuaiVaultProxy).runtimeCode);
     }
 
     /**
@@ -66,7 +74,7 @@ contract QuaiVaultFactory {
         if (owners.length > 20) revert TooManyOwners(); // MUST match QuaiVault.MAX_OWNERS — update both if changed
         if (threshold == 0 || threshold > owners.length) revert InvalidThreshold();
         for (uint256 i = 0; i < owners.length;) {
-            if (owners[i] == address(0)) revert InvalidOwnerAddress();
+            if (owners[i] == address(0) || owners[i] == address(1)) revert InvalidOwnerAddress(); // BB-M-2: also reject SENTINEL
             for (uint256 j = i + 1; j < owners.length;) {
                 if (owners[i] == owners[j]) revert DuplicateOwner();
                 unchecked { j++; }
@@ -92,7 +100,7 @@ contract QuaiVaultFactory {
         // Encode initialize call for the constructor's delegatecall
         bytes memory initData = abi.encodeCall(
             QuaiVault.initialize,
-            (owners, threshold, 0)
+            (owners, threshold, 0, true)
         );
 
         // Deploy ERC1967 constructor proxy with CREATE2
@@ -128,7 +136,46 @@ contract QuaiVaultFactory {
         // Encode initialize call for the constructor's delegatecall
         bytes memory initData = abi.encodeCall(
             QuaiVault.initialize,
-            (owners, threshold, minExecutionDelay)
+            (owners, threshold, minExecutionDelay, true)
+        );
+
+        // Deploy ERC1967 constructor proxy with CREATE2
+        bytes32 fullSalt = keccak256(abi.encodePacked(msg.sender, salt));
+        wallet = address(new QuaiVaultProxy{salt: fullSalt}(implementation, initData));
+
+        // Register wallet
+        deployedWallets.push(wallet);
+        isWallet[wallet] = true;
+
+        emit WalletCreated(wallet, owners, threshold, msg.sender, salt);
+
+        return wallet;
+    }
+
+    /**
+     * @notice Create a new multisig wallet with full configuration
+     * @param owners Array of owner addresses
+     * @param threshold Number of required approvals
+     * @param salt Salt for CREATE2 (must be mined for valid shard prefix)
+     * @param minExecutionDelay Vault-level minimum delay for external calls in seconds (0 = simple quorum)
+     * @param delegatecallDisabled CR-1: When true, modules cannot execute DelegateCall operations.
+     *        Set to false for vaults that need DelegateCall modules (e.g., Baal DAO governance via MultiSend).
+     * @return wallet Address of the created wallet
+     */
+    function createWallet(
+        address[] calldata owners,
+        uint256 threshold,
+        bytes32 salt,
+        uint32 minExecutionDelay,
+        bool delegatecallDisabled
+    ) external returns (address wallet) {
+        _validateOwners(owners, threshold);
+        if (minExecutionDelay > MAX_EXECUTION_DELAY) revert ExecutionDelayTooLong(); // L-1
+
+        // Encode initialize call for the constructor's delegatecall
+        bytes memory initData = abi.encodeCall(
+            QuaiVault.initialize,
+            (owners, threshold, minExecutionDelay, delegatecallDisabled)
         );
 
         // Deploy ERC1967 constructor proxy with CREATE2
@@ -151,6 +198,7 @@ contract QuaiVaultFactory {
      * @param owners Array of owner addresses (needed for constructor arg hash)
      * @param threshold Number of required approvals
      * @param minExecutionDelay Vault-level minimum delay (0 for simple quorum)
+     * @param delegatecallDisabled CR-1: Whether DelegateCall is blocked for modules
      * @return Predicted wallet address
      */
     function predictWalletAddress(
@@ -158,12 +206,13 @@ contract QuaiVaultFactory {
         bytes32 salt,
         address[] calldata owners,
         uint256 threshold,
-        uint32 minExecutionDelay
+        uint32 minExecutionDelay,
+        bool delegatecallDisabled
     ) external view returns (address) {
         bytes32 fullSalt = keccak256(abi.encodePacked(deployer, salt));
         bytes memory initData = abi.encodeCall(
             QuaiVault.initialize,
-            (owners, threshold, minExecutionDelay)
+            (owners, threshold, minExecutionDelay, delegatecallDisabled)
         );
         bytes32 bytecodeHash = keccak256(abi.encodePacked(
             type(QuaiVaultProxy).creationCode,
@@ -186,8 +235,16 @@ contract QuaiVaultFactory {
         if (wallet == address(0)) revert InvalidWalletAddress();
         if (isWallet[wallet]) revert WalletAlreadyRegistered();
 
-        // M-3: Verify the wallet's ERC1967 implementation slot points to our implementation.
-        // More robust than bytecode pattern matching — checks actual runtime state.
+        // BB-L-1: Verify wallet bytecode matches QuaiVaultProxy via extcodehash (unforgeable).
+        // Unlike getImplementation() which is a function call the target controls, extcodehash
+        // is an EVM opcode that reads the actual deployed bytecode — cannot be spoofed.
+        bytes32 codeHash;
+        assembly { codeHash := extcodehash(wallet) }
+        if (codeHash != proxyCodeHash) revert InvalidWalletImplementation();
+
+        // M-3: Also verify the ERC1967 implementation slot points to our implementation.
+        // The bytecode check above proves it's a real QuaiVaultProxy; this check confirms
+        // it's pointing to the correct QuaiVault implementation (not a different factory's).
         try QuaiVaultProxy(payable(wallet)).getImplementation() returns (address impl) {
             if (impl != implementation) revert InvalidWalletImplementation();
         } catch {

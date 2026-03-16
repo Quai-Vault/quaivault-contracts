@@ -106,13 +106,13 @@ describe("QuaiVault", function () {
 
     it("should reject double initialization (Initializable)", async function () {
       await expect(
-        wallet.initialize([owner1.address], 1, 0)
+        wallet.initialize([owner1.address], 1, 0, true)
       ).to.be.revertedWithCustomError(wallet, "InvalidInitialization");
     });
 
     it("should reject initialization on implementation contract directly", async function () {
       await expect(
-        implementation.initialize([owner1.address], 1, 0)
+        implementation.initialize([owner1.address], 1, 0, true)
       ).to.be.revertedWithCustomError(
         implementation,
         "InvalidInitialization"
@@ -805,6 +805,22 @@ describe("QuaiVault", function () {
       const tx = await wallet
         .connect(owner1)
         .proposeTransaction(walletAddr, 0, data);
+      const txHash = await getTxHash(wallet, tx);
+      await wallet.connect(owner1).approveTransaction(txHash);
+      await wallet.connect(owner2).approveTransaction(txHash);
+
+      await expect(
+        wallet.connect(owner1).executeTransaction(txHash)
+      ).to.be.revertedWithCustomError(wallet, "InvalidOwnerAddress");
+    });
+
+    // BB-M-2 defense-in-depth: SENTINEL_MODULES must not be an owner
+    it("should revert addOwner with SENTINEL address (BB-M-2)", async function () {
+      const SENTINEL = "0x0000000000000000000000000000000000000001";
+      const data = wallet.interface.encodeFunctionData("addOwner", [SENTINEL]);
+      const walletAddr = await wallet.getAddress();
+
+      const tx = await wallet.connect(owner1).proposeTransaction(walletAddr, 0, data);
       const txHash = await getTxHash(wallet, tx);
       await wallet.connect(owner1).approveTransaction(txHash);
       await wallet.connect(owner2).approveTransaction(txHash);

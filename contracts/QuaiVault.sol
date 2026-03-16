@@ -57,15 +57,25 @@ contract QuaiVault is
     error CalldataTooShort();
     error MessageNotSigned();
     error SelfCallCannotHaveValue();
+    error ExecutionDelayTooLong();       // BB-M-1: minExecutionDelay exceeds MAX_EXECUTION_DELAY
+    error ImplementationSlotTampered();  // BB-L-4: DelegateCall overwrote ERC1967 implementation slot
+    error DelegateCallDisabled();        // CR-1: DelegateCall blocked by security hardening flag
 
     /// @notice Maximum number of owners allowed (prevents DoS from gas-intensive loops)
     uint256 public constant MAX_OWNERS = 20;
+
+    /// @notice Maximum allowed minExecutionDelay (30 days) to prevent accidental wallet bricking (BB-M-1)
+    uint32 public constant MAX_EXECUTION_DELAY = 30 days;
 
     /// @notice Maximum number of modules allowed
     uint256 public constant MAX_MODULES = 50;
 
     /// @notice Sentinel address used as head of module linked list (Zodiac IAvatar standard)
     address internal constant SENTINEL_MODULES = address(0x1);
+
+    /// @dev ERC1967 implementation storage slot (BB-L-4: post-delegatecall invariant check)
+    bytes32 private constant _ERC1967_IMPL_SLOT =
+        0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
     /// @dev EIP-712 domain separator typehash (I-2: includes name and version for standard compliance)
     bytes32 private constant DOMAIN_SEPARATOR_TYPEHASH =
@@ -157,6 +167,13 @@ contract QuaiVault is
     ///      retain the executionDelay locked in at proposal time.
     uint32 public minExecutionDelay;
 
+    /// @notice CR-1: When true, modules cannot execute DelegateCall operations.
+    /// @dev Defaults to true (security-first). Closes the entire class of delegatecall-based
+    ///      storage corruption attacks (Bybit vector, arbitrary slot overwrite, SELFDESTRUCT via
+    ///      delegatecall). Owners can disable via setDelegatecallDisabled(false) if a module
+    ///      legitimately requires delegatecall (e.g., MultiSend batching).
+    bool public delegatecallDisabled;
+
     // ==================== Events ====================
 
     /// @notice I-1: Includes expiration and executionDelay for complete off-chain lifecycle tracking
@@ -215,6 +232,9 @@ contract QuaiVault is
     /// @notice Emitted when an expired tx is formally closed via expireTransaction
     event TransactionExpired(bytes32 indexed txHash);
 
+    /// @notice CR-1: Emitted when the delegatecall security flag is toggled
+    event DelegatecallDisabledChanged(bool disabled);
+
     // ==================== Modifiers ====================
 
     modifier onlyOwner() {
@@ -265,7 +285,8 @@ contract QuaiVault is
     function initialize(
         address[] memory _owners,
         uint256 _threshold,
-        uint32 _minExecutionDelay
+        uint32 _minExecutionDelay,
+        bool _delegatecallDisabled
     ) external initializer {
         if (_owners.length == 0) revert OwnersRequired();
         if (_owners.length > MAX_OWNERS) revert TooManyOwners();
@@ -278,7 +299,8 @@ contract QuaiVault is
         for (uint256 i = 0; i < _owners.length;) {
             address owner = _owners[i];
 
-            if (owner == address(0) || owner == address(this)) revert InvalidOwnerAddress();
+            if (owner == address(0) || owner == address(this) || owner == SENTINEL_MODULES)
+                revert InvalidOwnerAddress();
             if (isOwner[owner]) revert DuplicateOwner();
 
             isOwner[owner] = true;
@@ -287,11 +309,16 @@ contract QuaiVault is
         }
 
         threshold = _threshold;
+        if (_minExecutionDelay > MAX_EXECUTION_DELAY) revert ExecutionDelayTooLong(); // BB-M-1
         minExecutionDelay = _minExecutionDelay;
         // M-4: nonce defaults to 0, no explicit assignment needed
 
         // Initialize module linked list (empty list: sentinel points to itself)
         modules[SENTINEL_MODULES] = SENTINEL_MODULES;
+
+        // CR-1: DelegateCall configurable at deploy time (security-first default: true)
+        delegatecallDisabled = _delegatecallDisabled;
+        emit DelegatecallDisabledChanged(_delegatecallDisabled);
     }
 
     // ==================== Transaction Lifecycle ====================
@@ -693,7 +720,11 @@ contract QuaiVault is
     // ==================== Owner Management ====================
 
     function _addOwner(address owner) internal {
-        if (owner == address(0) || owner == address(this)) revert InvalidOwnerAddress();
+        // BB-M-2 defense-in-depth: SENTINEL_MODULES (0x1) must never be an owner.
+        // It's the head of the module linked list — making it an owner creates a phantom
+        // who can never sign, potentially bricking the wallet if threshold is set high enough.
+        if (owner == address(0) || owner == address(this) || owner == SENTINEL_MODULES)
+            revert InvalidOwnerAddress();
         if (isOwner[owner]) revert AlreadyAnOwner();
         if (owners.length >= MAX_OWNERS) revert MaxOwnersReached();
 
@@ -741,6 +772,13 @@ contract QuaiVault is
         _removeOwner(owner);
     }
 
+    /// @dev BB-I-3: Lowering the threshold may cause in-flight timelocked transactions to become
+    ///      unexecutable if their expiration is tight. When the threshold drops, transactions that
+    ///      already have enough approvals under the new threshold trigger the lazy clock start path
+    ///      in executeTransaction (approvedAt is set late). If the resulting executableAfter
+    ///      (approvedAt + executionDelay) exceeds the transaction's expiration, the tx is permanently
+    ///      stuck until expireTransaction cleans it up. No attacker gain — threshold changes require
+    ///      multisig consensus — but operators should be aware of this interaction.
     function _changeThreshold(uint256 _threshold) internal {
         if (_threshold == 0 || _threshold > owners.length) revert InvalidThreshold();
 
@@ -797,9 +835,24 @@ contract QuaiVault is
     }
 
     function _setMinExecutionDelay(uint32 delay) internal {
+        if (delay > MAX_EXECUTION_DELAY) revert ExecutionDelayTooLong(); // BB-M-1
         uint32 old = minExecutionDelay;
         minExecutionDelay = delay;
         emit MinExecutionDelayChanged(old, delay);
+    }
+
+    /**
+     * @notice CR-1: Toggle the delegatecall security hardening flag
+     * @param disabled true = block all module DelegateCall operations (secure default);
+     *                 false = allow module DelegateCall (required for MultiSend batching)
+     */
+    function setDelegatecallDisabled(bool disabled) external onlySelf {
+        _setDelegatecallDisabled(disabled);
+    }
+
+    function _setDelegatecallDisabled(bool disabled) internal {
+        delegatecallDisabled = disabled;
+        emit DelegatecallDisabledChanged(disabled);
     }
 
     // ==================== Expired Transaction Cleanup ====================
@@ -871,6 +924,9 @@ contract QuaiVault is
         } else if (selector == this.setMinExecutionDelay.selector) {
             uint32 delay = abi.decode(_stripSelector(data), (uint32));
             _setMinExecutionDelay(delay);
+        } else if (selector == this.setDelegatecallDisabled.selector) {
+            bool disabled = abi.decode(_stripSelector(data), (bool));
+            _setDelegatecallDisabled(disabled);
         } else {
             // H-3: Revert on unrecognized self-call selectors
             revert UnrecognizedSelfCall(selector);
@@ -1011,8 +1067,17 @@ contract QuaiVault is
         if (to == address(0)) revert InvalidDestinationAddress();
 
         if (operation == Enum.Operation.DelegateCall) {
-            // H-2: Use high-level delegatecall consistently
+            // CR-1: Block delegatecall entirely when hardening flag is set
+            if (delegatecallDisabled) revert DelegateCallDisabled();
+            // BB-L-4: Snapshot implementation slot before delegatecall to detect tampering.
+            // A malicious delegatecall target could overwrite the ERC1967 slot, effectively
+            // "upgrading" this non-upgradeable proxy to a hostile implementation.
+            bytes32 implBefore;
+            assembly { implBefore := sload(_ERC1967_IMPL_SLOT) }
             (success, ) = to.delegatecall(data);
+            bytes32 implAfter;
+            assembly { implAfter := sload(_ERC1967_IMPL_SLOT) }
+            if (implAfter != implBefore) revert ImplementationSlotTampered();
         } else {
             (success, ) = to.call{value: value}(data);
         }
@@ -1051,8 +1116,15 @@ contract QuaiVault is
         if (to == address(0)) revert InvalidDestinationAddress();
 
         if (operation == Enum.Operation.DelegateCall) {
-            // H-2: Use high-level delegatecall consistently
+            // CR-1: Block delegatecall entirely when hardening flag is set
+            if (delegatecallDisabled) revert DelegateCallDisabled();
+            // BB-L-4: Same implementation slot guard as execTransactionFromModule
+            bytes32 implBefore;
+            assembly { implBefore := sload(_ERC1967_IMPL_SLOT) }
             (success, returnData) = to.delegatecall(data);
+            bytes32 implAfter;
+            assembly { implAfter := sload(_ERC1967_IMPL_SLOT) }
+            if (implAfter != implBefore) revert ImplementationSlotTampered();
         } else {
             (success, returnData) = to.call{value: value}(data);
         }

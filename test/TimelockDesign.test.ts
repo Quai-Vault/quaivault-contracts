@@ -98,6 +98,14 @@ describe("Timelock Design", function () {
       const wallet = await deployTimelockWallet(ONE_DAY);
       expect(await factory.isWallet(await wallet.getAddress())).to.be.true;
     });
+
+    // BB-M-1: Factory also rejects excessive delay at initialize time
+    it("4-param createWallet rejects delay exceeding MAX_EXECUTION_DELAY (BB-M-1)", async function () {
+      const THIRTY_ONE_DAYS = 31 * 24 * 60 * 60;
+      await expect(
+        deployTimelockWallet(THIRTY_ONE_DAYS)
+      ).to.be.revertedWithCustomError(factory, "ExecutionDelayTooLong");
+    });
   });
 
   // ==================== approvedAt Clock Semantics ====================
@@ -766,6 +774,26 @@ describe("Timelock Design", function () {
       const txHash = await proposeExternal(wallet, owner1, nonOwner.address, ethers.parseEther("1"));
       const { executionDelay } = await wallet.getTransaction(txHash);
       expect(executionDelay).to.equal(ONE_DAY); // new floor applied
+    });
+
+    // BB-M-1: Upper bound prevents accidental wallet bricking
+    it("should revert ExecutionDelayTooLong when delay exceeds MAX_EXECUTION_DELAY (BB-M-1)", async function () {
+      const wallet = await deploySimpleWallet();
+      const THIRTY_ONE_DAYS = 31 * 24 * 60 * 60;
+      const setDelayData = wallet.interface.encodeFunctionData("setMinExecutionDelay", [THIRTY_ONE_DAYS]);
+
+      await expect(executeSelfCall(wallet, setDelayData, [owner1, owner2, owner3], THRESHOLD))
+        .to.be.revertedWithCustomError(wallet, "ExecutionDelayTooLong");
+    });
+
+    it("should accept MAX_EXECUTION_DELAY exactly (BB-M-1 boundary)", async function () {
+      const wallet = await deploySimpleWallet();
+      const THIRTY_DAYS = 30 * 24 * 60 * 60;
+      const setDelayData = wallet.interface.encodeFunctionData("setMinExecutionDelay", [THIRTY_DAYS]);
+
+      await expect(executeSelfCall(wallet, setDelayData, [owner1, owner2, owner3], THRESHOLD))
+        .to.be.fulfilled;
+      expect(await wallet.minExecutionDelay()).to.equal(THIRTY_DAYS);
     });
   });
 });

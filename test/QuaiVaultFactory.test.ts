@@ -208,6 +208,19 @@ describe("QuaiVaultFactory", function () {
         )
       ).to.be.revertedWithCustomError(factory, "InvalidOwnerAddress");
     });
+
+    // BB-M-2: Factory must also reject SENTINEL as owner
+    it("should reject SENTINEL address as owner (BB-M-2)", async function () {
+      const SENTINEL = "0x0000000000000000000000000000000000000001";
+      const salt = ethers.randomBytes(32);
+      await expect(
+        factory.connect(owner1).createWallet(
+          [owner1.address, SENTINEL],
+          1,
+          salt
+        )
+      ).to.be.revertedWithCustomError(factory, "InvalidOwnerAddress");
+    });
   });
 
   describe("createWallet with minExecutionDelay", function () {
@@ -234,6 +247,84 @@ describe("QuaiVaultFactory", function () {
       const newWallet = QV.attach(walletAddr) as QuaiVault;
 
       expect(await newWallet.minExecutionDelay()).to.equal(3600);
+    });
+  });
+
+  describe("createWallet with delegatecallDisabled (CR-1)", function () {
+    it("should create wallet with delegatecallDisabled=false via 5-param overload", async function () {
+      const salt = ethers.randomBytes(32);
+      const tx = await factory.connect(owner1)
+        ["createWallet(address[],uint256,bytes32,uint32,bool)"](
+          [owner1.address, owner2.address],
+          1,
+          salt,
+          0,
+          false
+        );
+      const receipt = await tx.wait();
+
+      const event = receipt?.logs.find((log) => {
+        try {
+          return factory.interface.parseLog(log as any)?.name === "WalletCreated";
+        } catch {
+          return false;
+        }
+      });
+      const walletAddr = factory.interface.parseLog(event as any)?.args[0];
+      const QV = await ethers.getContractFactory("QuaiVault");
+      const newWallet = QV.attach(walletAddr) as QuaiVault;
+
+      expect(await newWallet.delegatecallDisabled()).to.equal(false);
+    });
+
+    it("should create wallet with delegatecallDisabled=true via 5-param overload", async function () {
+      const salt = ethers.randomBytes(32);
+      const tx = await factory.connect(owner1)
+        ["createWallet(address[],uint256,bytes32,uint32,bool)"](
+          [owner1.address],
+          1,
+          salt,
+          0,
+          true
+        );
+      const receipt = await tx.wait();
+
+      const event = receipt?.logs.find((log) => {
+        try {
+          return factory.interface.parseLog(log as any)?.name === "WalletCreated";
+        } catch {
+          return false;
+        }
+      });
+      const walletAddr = factory.interface.parseLog(event as any)?.args[0];
+      const QV = await ethers.getContractFactory("QuaiVault");
+      const newWallet = QV.attach(walletAddr) as QuaiVault;
+
+      expect(await newWallet.delegatecallDisabled()).to.equal(true);
+    });
+
+    it("3-param and 4-param overloads default delegatecallDisabled to true", async function () {
+      const salt1 = ethers.randomBytes(32);
+      const tx1 = await factory.connect(owner1).createWallet([owner1.address], 1, salt1);
+      const receipt1 = await tx1.wait();
+      const event1 = receipt1?.logs.find((log) => {
+        try { return factory.interface.parseLog(log as any)?.name === "WalletCreated"; } catch { return false; }
+      });
+      const addr1 = factory.interface.parseLog(event1 as any)?.args[0];
+      const QV = await ethers.getContractFactory("QuaiVault");
+      const wallet1 = QV.attach(addr1) as QuaiVault;
+      expect(await wallet1.delegatecallDisabled()).to.equal(true);
+
+      const salt2 = ethers.randomBytes(32);
+      const tx2 = await factory.connect(owner1)
+        ["createWallet(address[],uint256,bytes32,uint32)"]([owner1.address], 1, salt2, 3600);
+      const receipt2 = await tx2.wait();
+      const event2 = receipt2?.logs.find((log) => {
+        try { return factory.interface.parseLog(log as any)?.name === "WalletCreated"; } catch { return false; }
+      });
+      const addr2 = factory.interface.parseLog(event2 as any)?.args[0];
+      const wallet2 = QV.attach(addr2) as QuaiVault;
+      expect(await wallet2.delegatecallDisabled()).to.equal(true);
     });
   });
 
@@ -373,7 +464,7 @@ describe("QuaiVaultFactory", function () {
 
       // Predict address with owners/threshold/delay (needed for constructor proxy bytecodeHash)
       const predicted = await factory.predictWalletAddress(
-        owner1.address, salt, owners, threshold, minExecutionDelay
+        owner1.address, salt, owners, threshold, minExecutionDelay, true
       );
 
       // Actually create the wallet using the same salt
