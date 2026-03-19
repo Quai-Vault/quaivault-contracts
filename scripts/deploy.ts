@@ -9,7 +9,7 @@ import { HttpNetworkConfig } from "hardhat/types";
 const QuaiVaultJson = require("../artifacts/contracts/QuaiVault.sol/QuaiVault.json");
 const QuaiVaultFactoryJson = require("../artifacts/contracts/QuaiVaultFactory.sol/QuaiVaultFactory.json");
 const SocialRecoveryModuleJson = require("../artifacts/contracts/modules/SocialRecoveryModule.sol/SocialRecoveryModule.json");
-const MultiSendJson = require("../artifacts/contracts/libraries/MultiSend.sol/MultiSend.json");
+const MultiSendCallOnlyJson = require("../artifacts/contracts/libraries/MultiSendCallOnly.sol/MultiSendCallOnly.json");
 
 // Optional: deploy MockModule for on-chain testing (set DEPLOY_MOCK_MODULE=true)
 const DEPLOY_MOCK_MODULE = process.env.DEPLOY_MOCK_MODULE === "true";
@@ -123,26 +123,26 @@ async function main() {
   console.log("Transaction hash:", socialRecovery.deploymentTransaction()?.hash);
   console.log("SocialRecoveryModule deployed to:", socialRecoveryAddress);
 
-  // Deploy MultiSend (Zodiac infrastructure for batched transactions)
-  console.log("\nDeploying MultiSend...");
+  // Deploy MultiSendCallOnly (Call-only batching — no nested DelegateCall)
+  console.log("\nDeploying MultiSendCallOnly...");
 
-  const multiSendIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(
-    MultiSendJson.bytecode
+  const multiSendCallOnlyIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(
+    MultiSendCallOnlyJson.bytecode
   );
-  console.log("Metadata IPFS hash:", multiSendIpfsHash);
+  console.log("Metadata IPFS hash:", multiSendCallOnlyIpfsHash);
 
-  const MultiSend = new quais.ContractFactory(
-    MultiSendJson.abi,
-    MultiSendJson.bytecode,
+  const MultiSendCallOnly = new quais.ContractFactory(
+    MultiSendCallOnlyJson.abi,
+    MultiSendCallOnlyJson.bytecode,
     wallet,
-    multiSendIpfsHash
+    multiSendCallOnlyIpfsHash
   );
 
-  const multiSend = await MultiSend.deploy();
-  await multiSend.waitForDeployment();
-  const multiSendAddress = await multiSend.getAddress();
-  console.log("Transaction hash:", multiSend.deploymentTransaction()?.hash);
-  console.log("MultiSend deployed to:", multiSendAddress);
+  const multiSendCallOnly = await MultiSendCallOnly.deploy();
+  await multiSendCallOnly.waitForDeployment();
+  const multiSendCallOnlyAddress = await multiSendCallOnly.getAddress();
+  console.log("Transaction hash:", multiSendCallOnly.deploymentTransaction()?.hash);
+  console.log("MultiSendCallOnly deployed to:", multiSendCallOnlyAddress);
 
   // Deploy test contracts (optional — for on-chain testing only, set DEPLOY_MOCK_MODULE=true)
   let mockModuleAddress = "";
@@ -230,13 +230,13 @@ async function main() {
       QuaiVault: implementationAddress,
       QuaiVaultFactory: factoryAddress,
       SocialRecoveryModule: socialRecoveryAddress,
-      MultiSend: multiSendAddress,
+      MultiSendCallOnly: multiSendCallOnlyAddress,
     },
     ipfsHashes: {
       QuaiVault: implementationIpfsHash,
       QuaiVaultFactory: factoryIpfsHash,
       SocialRecoveryModule: socialRecoveryIpfsHash,
-      MultiSend: multiSendIpfsHash,
+      MultiSendCallOnly: multiSendCallOnlyIpfsHash,
     },
   };
 
@@ -274,7 +274,7 @@ async function main() {
   console.log("QuaiVault Implementation:", implementationAddress);
   console.log("QuaiVaultFactory:", factoryAddress);
   console.log("SocialRecoveryModule:", socialRecoveryAddress);
-  console.log("MultiSend:", multiSendAddress);
+  console.log("MultiSendCallOnly:", multiSendCallOnlyAddress);
   if (DEPLOY_MOCK_MODULE) {
     if (mockModuleAddress) console.log("MockModule:", mockModuleAddress);
     if (mockERC721Address) console.log("MockERC721:", mockERC721Address);

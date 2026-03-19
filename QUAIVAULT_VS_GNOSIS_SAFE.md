@@ -43,7 +43,7 @@ It natively supports approval revocation and message un-signing, which Safe does
 | **Failed calls** | Non-reverting, nonce consumed | Non-reverting, marked terminal |
 | **Gas refund** | Built-in (ETH/ERC-20) | None |
 | **Guards** | Transaction Guard + Module Guard | None (structural security) |
-| **DelegateCall hardening** | Opt-in guard (Guardrail, Aug 2025) | Native `delegatecallDisabled` flag (default: blocked) |
+| **DelegateCall hardening** | Opt-in guard (Guardrail, Aug 2025) | Native `delegatecallAllowed` whitelist (default: empty/blocked) + MultiSendCallOnly |
 | **Approval revocation** | Not supported | Native `revokeApproval` |
 | **Message un-signing** | Not supported | Native `unsignMessage` |
 | **Max owners** | Unlimited (gas-bounded) | 20 (enforced constant) |
@@ -122,7 +122,7 @@ via the standard Zodiac IAvatar interface.
 | **Queuing** | Single queue, head-of-line blocking | Parallel — multiple txs in-flight simultaneously |
 | **Replay protection** | Nonce increment (consumed before execution) | Hash uniqueness (monotonic nonce in hash preimage) |
 | **Operation types** | `Call` and `DelegateCall` | `Call` only for user txs; `DelegateCall` only via modules (blocked by default — CR-1) |
-| **Batching** | Via MultiSend library (DELEGATECALL) | Via MultiSend library (module DELEGATECALL, requires `delegatecallDisabled=false`) |
+| **Batching** | Via MultiSend library (DELEGATECALL) | Via MultiSendCallOnly (module DELEGATECALL, target must be whitelisted; nested DelegateCall blocked) |
 
 ### Execution model difference
 
@@ -351,7 +351,7 @@ interface IAvatar {
 | **Module limit** | Unlimited | MAX_MODULES = 50 |
 | **Module execution** | Bypasses threshold; optionally guarded via Module Guard (v1.5.0) | Modules are trusted, bypass all checks (no module guard) |
 | **Module Guard** | `IModuleGuard` — pre/post checks on module-initiated txs (v1.5.0) | Not supported — modules are fully trusted once enabled |
-| **DelegateCall via modules** | Supported; optionally restricted via Guardrail guard (allowlist + time-delay, Aug 2025) | Blocked by default (`delegatecallDisabled=true`); opt-in via consensus toggle. When enabled, BB-L-4 guards the ERC1967 implementation slot |
+| **DelegateCall via modules** | Supported; optionally restricted via Guardrail guard (allowlist + time-delay, Aug 2025) | Blocked by default (empty `delegatecallAllowed` whitelist); opt-in per target via `addDelegatecallTarget`. When whitelisted, BB-L-4 guards the ERC1967 implementation slot |
 | **Self-call prevention** | No — modules can target the Safe itself | No — modules can target the vault itself (same trust model as Safe) |
 | **3-param legacy** | `execTransactionFromModule(to, value, data)` — removed in v1.5.0 | Supported via ISimpleModuleExecutor |
 | **Module enablement** | `authorized` (self-call via `execTransaction`, requires threshold) | `onlySelf` (vault threshold) |
@@ -410,14 +410,15 @@ approaches:
 
 | Property | Safe (Guardrail) | QuaiVault (CR-1 + BB-L-4) |
 |---|---|---|
-| **Approach** | Optional guard contract (allowlist + time-delay) | Native contract flag (`delegatecallDisabled`) + implementation slot guard |
-| **Default** | DelegateCall unrestricted (opt-in to Guardrail) | DelegateCall blocked by default (opt-in to allow) |
-| **Granularity** | Per-target allowlist (approve specific contracts for DelegateCall) | Binary on/off for all DelegateCall operations |
-| **Time-delay** | Configurable delay on allowlist additions | N/A — toggle is immediate via consensus |
-| **Removability** | Guard can be removed by owners (`setGuard(address(0))`) | Flag can be toggled but the mechanism itself cannot be removed |
+| **Approach** | Optional guard contract (allowlist + time-delay) | Native whitelist (`delegatecallAllowed` mapping) + implementation slot guard |
+| **Default** | DelegateCall unrestricted (opt-in to Guardrail) | DelegateCall blocked by default (empty whitelist, opt-in per target) |
+| **Granularity** | Per-target allowlist (approve specific contracts for DelegateCall) | Per-target whitelist (`addDelegatecallTarget` / `removeDelegatecallTarget`) |
+| **Time-delay** | Configurable delay on allowlist additions | N/A — whitelist changes are immediate via consensus |
+| **Removability** | Guard can be removed by owners (`setGuard(address(0))`) | Whitelist entries can be toggled but the mechanism itself cannot be removed |
+| **Nested DelegateCall** | Not addressed (nested calls within MultiSend bypass Guardrail) | Addressed: MultiSendCallOnly blocks nested DelegateCall sub-transactions |
 | **Implementation slot protection** | No dedicated protection (relies on Guardrail allowlist) | BB-L-4: pre/post snapshot of ERC1967 slot around every DelegateCall; reverts with `ImplementationSlotTampered` if changed |
+| **Deploy-time configuration** | Requires separate deployment + `setGuard` call | Configured at wallet creation via `initialDelegatecallTargets` param |
 | **Release** | Aug 2025 (separate contract, not in core Safe) | Built into core contract |
-| **Deployment** | Requires separate deployment + `setGuard` call | Configured at wallet creation (`initialize` 4th param) |
 
 ### Architectural difference
 
@@ -425,18 +426,20 @@ approaches:
 maintains an allowlist of contracts approved for DelegateCall, with a configurable time-delay
 for additions (preventing instant allowlisting of malicious targets). Removals are immediate.
 It covers both owner-signed and module-initiated transactions. As a guard, it can be removed
-by owners at any time.
+by owners at any time. However, it does not address nested DelegateCall within batches.
 
 **QuaiVault's CR-1** is a native contract feature — consistent with QuaiVault's integrated
-philosophy. When `delegatecallDisabled=true` (the default), all DelegateCall operations via
-modules revert with `DelegateCallDisabled()`. When DelegateCall is allowed, BB-L-4 provides
+philosophy. The `delegatecallAllowed` mapping provides per-target granularity (comparable to
+Guardrail's allowlist) while being built into the core contract — it cannot be accidentally
+removed. When no targets are whitelisted (the default), all DelegateCall operations via modules
+revert with `DelegateCallNotAllowed(target)`. When targets are whitelisted, BB-L-4 provides
 defense-in-depth by snapshotting the ERC1967 implementation slot before/after every
-DelegateCall and reverting if the slot changed. This catches the specific Bybit attack
-vector (implementation slot overwrite) even when DelegateCall is enabled.
+DelegateCall and reverting if the slot changed.
 
-The key trade-off: Safe's Guardrail offers per-target granularity (allow MultiSend but block
-unknown contracts), while QuaiVault's CR-1 is all-or-nothing but cannot be accidentally
-misconfigured or removed.
+QuaiVault ships **MultiSendCallOnly** — a batching contract that rejects nested DelegateCall
+sub-transactions. This closes the vector where a whitelisted batching contract could be used
+to DelegateCall arbitrary targets within a batch without hitting the vault's whitelist check.
+Safe's Guardrail has this same gap but does not ship a CallOnly variant.
 
 ---
 
@@ -446,7 +449,7 @@ misconfigured or removed.
 |---|---|---|
 | **Pattern** | Custom proxy (`SafeProxy`) — singleton stored in storage slot 0 | ERC1967 constructor proxy |
 | **Proxy bytecode** | Minimal — all-assembly `fallback()`, handles `masterCopy()` inline | OpenZeppelin ERC1967Proxy |
-| **Initialization** | `setup(owners, threshold, to, data, fallbackHandler, paymentToken, payment, paymentReceiver)` — 8 params, optional setup DELEGATECALL + deployment payment | `initialize(owners, threshold, minExecutionDelay, delegatecallDisabled)` — 4 params |
+| **Initialization** | `setup(owners, threshold, to, data, fallbackHandler, paymentToken, payment, paymentReceiver)` — 8 params, optional setup DELEGATECALL + deployment payment | `initialize(owners, threshold, minExecutionDelay, initialModules[], initialDelegatecallTargets[])` — 5 params, atomic module + whitelist setup |
 | **Setup DELEGATECALL** | Optional `to.delegatecall(data)` during setup (enables `SafeToL2Setup`, module pre-configuration) | Not supported |
 | **Deployment payment** | Built-in — can pay deployer in ETH or ERC-20 during setup | Not supported |
 | **Upgradeability** | Non-upgradeable by default (no `changeMasterCopy`); migration possible via `SafeMigration` DELEGATECALL to overwrite slot 0 | Non-upgradeable (by design — no write path to implementation slot) |
@@ -454,7 +457,7 @@ misconfigured or removed.
 | **CREATE2 prediction** | `bytecodeHash = keccak256(proxyCreationCode + singleton)`, `salt = keccak256(keccak256(initializer), saltNonce)` — varies per wallet config | `keccak256(creationCode + constructorArgs)` — varies per wallet config |
 | **Chain-specific deployment** | `createChainSpecificProxyWithNonce` — includes `chainId` in salt (v1.5.0) | Not applicable — Quai Network is a single L1 |
 | **On-chain address prediction** | Removed in v1.5.0 — must compute off-chain using `proxyCreationCode()` | `predictWalletAddress` on factory |
-| **Factory functions** | `createProxyWithNonce`, `createProxyWithNonceL2`, `createChainSpecificProxyWithNonce`, `createChainSpecificProxyWithNonceL2` | `createWallet` (three overloads: 3-param, 4-param with `minExecutionDelay`, 5-param with `delegatecallDisabled`) |
+| **Factory functions** | `createProxyWithNonce`, `createProxyWithNonceL2`, `createChainSpecificProxyWithNonce`, `createChainSpecificProxyWithNonceL2` | `createWallet` (four overloads: 3-param, 4-param with `minExecutionDelay`, 5-param with `initialModules`, 6-param with `initialModules` + `initialDelegatecallTargets`) |
 
 ### Safe setup complexity
 
@@ -600,7 +603,7 @@ Events that indexers/frontends must handle:
 | Delay changed | N/A (Delay Modifier event) | `MinExecutionDelayChanged(oldDelay, newDelay)` |
 | Message signed | `SignMsg(msgHash)` (via SignMessageLib) | `MessageSigned(msgHash, data)` |
 | Message unsigned | N/A | `MessageUnsigned(msgHash, data)` |
-| DelegateCall toggled | N/A (Guardrail has own events) | `DelegatecallDisabledChanged(disabled)` |
+| DelegateCall whitelist changed | N/A (Guardrail has own events) | `DelegatecallTargetAdded(target)`, `DelegatecallTargetRemoved(target)` |
 | Recovery config cleared | N/A | `RecoveryConfigCleared(wallet)` (SocialRecoveryModule) |
 
 **SafeL2 events** (v1.5.0): The `SafeL2` contract overrides the virtual hooks to emit
@@ -628,7 +631,7 @@ means more on-chain gas for the approval process.
 | **Timelock** | Opt-in module (can be removed) | Native (cannot be removed, only adjusted) |
 | **Nonce model** | Sequential (head-of-line blocking) | Hash-based (parallel execution) |
 | **Failed call handling** | Non-reverting — emits `ExecutionFailure`, nonce consumed | Non-reverting — emits `TransactionFailed`, marked terminal |
-| **DelegateCall hardening** | Guardrail guard (opt-in allowlist + time-delay, Aug 2025) | Native `delegatecallDisabled` (blocked by default) + BB-L-4 impl slot guard |
+| **DelegateCall hardening** | Guardrail guard (opt-in allowlist + time-delay, Aug 2025) | Native `delegatecallAllowed` whitelist (blocked by default) + BB-L-4 impl slot guard + MultiSendCallOnly |
 | **Module trust model** | Optional Module Guard (v1.5.0) for pre/post validation | Fully trusted — no module guard |
 | **Guard system** | Transaction Guard + Module Guard — arbitrary pre/post hooks | None — security is structural, not policy-based |
 | **Max owners** | Unlimited | 20 (bounds gas for approval counting) |
@@ -676,7 +679,7 @@ For teams considering a move from Safe to QuaiVault:
 
 9. **DelegateCall**: Safe allows unrestricted DelegateCall by default; Guardrail is opt-in.
    QuaiVault blocks DelegateCall by default. If your modules require DelegateCall (e.g.,
-   MultiSend batching), deploy with `delegatecallDisabled=false` or toggle it post-deploy
+   MultiSend batching), deploy with `MultiSendCallOnly` in `initialDelegatecallTargets` or add it post-deploy via `addDelegatecallTarget`
    via consensus. The BB-L-4 implementation slot guard provides defense-in-depth when
    DelegateCall is enabled.
 
@@ -728,7 +731,7 @@ security properties hold regardless of operator sophistication.
 
 - **DelegateCall blocked by default.** Safe allows unrestricted DelegateCall; its Guardrail
   guard (Aug 2025) is opt-in and removable. QuaiVault blocks all module DelegateCall
-  operations by default (`delegatecallDisabled=true`). When DelegateCall is enabled, the
+  operations by default (empty `delegatecallAllowed` whitelist). When specific targets are whitelisted, the
   BB-L-4 implementation slot guard provides defense-in-depth by catching the specific
   Bybit attack vector. The flag cannot be removed from the contract — only toggled by
   consensus.

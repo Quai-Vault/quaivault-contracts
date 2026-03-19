@@ -11,8 +11,8 @@ Zodiac IAvatar compatibility for Quai Network.
 - **Hash-based transactions** (unordered, no head-of-line blocking)
 - **Epoch-based approval invalidation** (owner removal atomically invalidates all their approvals)
 - **Option B failure handling** (external call failures are terminal, never revert)
-- **DelegateCall hardening** (CR-1: `delegatecallDisabled` flag, default on, blocks module DelegateCall)
-- **Zodiac IAvatar module system** (linked list, optional DelegateCall support, MultiSend batching)
+- **DelegateCall hardening** (CR-1: `delegatecallAllowed` whitelist, empty by default, blocks module DelegateCall; MultiSendCallOnly for safe batching)
+- **Zodiac IAvatar module system** (linked list, optional DelegateCall support, MultiSendCallOnly batching)
 - **Social recovery** via guardian-based module
 - **EIP-1271** contract signatures (mapping-based pre-approval)
 - **ERC-721 / ERC-1155** token receivers (native, not via fallback handler)
@@ -123,7 +123,7 @@ to the shared QuaiVault implementation.
 
 | Contract | Purpose |
 |---|---|
-| **MultiSend.sol** | Batched transaction execution via DelegateCall (Gnosis Safe compatible) |
+| **MultiSendCallOnly.sol** | Batched Call-only transaction execution via DelegateCall (nested DelegateCall blocked) |
 | **Enum.sol** | Operation type enum (Call / DelegateCall) |
 
 ### Modules
@@ -179,7 +179,8 @@ QuaiVault emits 20 events covering the complete transaction lifecycle:
 | `ExecutionFromModuleFailure` | Module-executed transaction failed |
 | `Received` | Plain QUAI received (via proxy or fallback) |
 | `MinExecutionDelayChanged` | Vault-level execution delay changed |
-| `DelegatecallDisabledChanged` | CR-1: DelegateCall security flag toggled via multisig self-call |
+| `DelegatecallTargetAdded` | CR-1: Address added to DelegateCall whitelist via multisig self-call |
+| `DelegatecallTargetRemoved` | CR-1: Address removed from DelegateCall whitelist via multisig self-call |
 | `MessageSigned` | EIP-1271 message pre-approved via multisig |
 | `MessageUnsigned` | EIP-1271 message approval revoked via multisig |
 
@@ -204,14 +205,20 @@ QuaiVault emits 20 events covering the complete transaction lifecycle:
 
 ### DelegateCall Hardening (CR-1)
 
-Module DelegateCall is **disabled by default** via the `delegatecallDisabled` flag.
-When enabled, modules can only execute `Call` operations. This blocks the primary
+Module DelegateCall is **blocked by default** via an empty `delegatecallAllowed` whitelist.
+Only explicitly whitelisted target addresses can be DelegateCall'd. This blocks the primary
 attack vector where a compromised module could use DelegateCall to modify vault storage.
 
-For vaults that require MultiSend batching (e.g., DAO governance with Baal),
-DelegateCall can be enabled at deploy time or toggled post-deploy via owner consensus
-(`setDelegatecallDisabled`). **Only disable this protection when DelegateCall is
-genuinely required, and only enable trusted, audited modules.**
+For vaults that require batching (e.g., DAO governance with Baal), whitelist
+`MultiSendCallOnly` at deploy time via `initialDelegatecallTargets` or post-deploy via
+`addDelegatecallTarget`. MultiSendCallOnly executes batched Call operations but blocks
+nested DelegateCall sub-transactions within batches, preventing the bypass vector where
+arbitrary targets could be DelegateCall'd without hitting the vault's whitelist check.
+
+Modules and DelegateCall targets can be configured atomically at deploy time via the
+`initialModules` and `initialDelegatecallTargets` parameters in `initialize()`, enabling
+DAO summoner patterns (e.g., BaalAndVaultSummoner) to launch vaults with governance
+modules already enabled.
 
 ### Audit Status
 

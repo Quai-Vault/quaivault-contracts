@@ -16,7 +16,8 @@
  *   WALLET_OWNERS - Comma-separated list of owner addresses (defaults to deployer)
  *   WALLET_THRESHOLD - Number of required approvals (defaults to 1)
  *   WALLET_MIN_DELAY - Minimum execution delay in seconds for external calls (defaults to 0 = simple quorum)
- *   WALLET_DELEGATECALL_DISABLED - "false" to allow module DelegateCall (defaults to "true" for security)
+ *   WALLET_DELEGATECALL_TARGETS - Comma-separated DelegateCall whitelist targets (empty = no DelegateCall)
+ *   WALLET_INITIAL_MODULES - Comma-separated module addresses to enable at deploy time
  */
 
 import hre from "hardhat";
@@ -50,7 +51,8 @@ async function mineSalt(
   owners: string[],
   threshold: number,
   minExecutionDelay: number = 0,
-  delegatecallDisabled: boolean = true
+  initialModules: string[] = [],
+  initialDelegatecallTargets: string[] = []
 ): Promise<{ salt: string; expectedAddress: string }> {
   console.log(`Mining for valid Quai address with ${TARGET_PREFIX} prefix (max ${MAX_MINING_ATTEMPTS} attempts)...`);
 
@@ -58,7 +60,7 @@ async function mineSalt(
   // bytecodeHash = keccak256(QuaiVaultProxy.creationCode ++ abi.encode(implementation, initData))
   const quaiVaultIface = new quais.Interface(QuaiVaultJson.abi);
   const initData = quaiVaultIface.encodeFunctionData("initialize", [
-    owners, threshold, minExecutionDelay, delegatecallDisabled,
+    owners, threshold, minExecutionDelay, initialModules, initialDelegatecallTargets,
   ]);
   const abiCoder = quais.AbiCoder.defaultAbiCoder();
   const constructorArgs = abiCoder.encode(
@@ -144,14 +146,24 @@ async function main() {
   // Parse minimum execution delay from env or default to 0 (simple quorum)
   const minExecutionDelay = parseInt(process.env.WALLET_MIN_DELAY || "0");
 
-  // CR-1: Parse delegatecall flag from env or default to true (security-first)
-  const delegatecallDisabled = process.env.WALLET_DELEGATECALL_DISABLED !== "false";
+  // CR-1: Parse DelegateCall whitelist targets from env (empty = no DelegateCall allowed)
+  const delegatecallTargetsEnv = process.env.WALLET_DELEGATECALL_TARGETS;
+  const initialDelegatecallTargets = delegatecallTargetsEnv
+    ? delegatecallTargetsEnv.split(",").map(a => a.trim()).filter(a => a.length > 0)
+    : [];
+
+  // Parse initial modules from env
+  const initialModulesEnv = process.env.WALLET_INITIAL_MODULES;
+  const initialModules = initialModulesEnv
+    ? initialModulesEnv.split(",").map(a => a.trim()).filter(a => a.length > 0)
+    : [];
 
   console.log("\nWallet Configuration:");
   console.log("  Owners:", owners);
   console.log("  Threshold:", threshold);
   console.log("  Min Execution Delay:", minExecutionDelay > 0 ? `${minExecutionDelay}s` : "0 (simple quorum)");
-  console.log("  DelegateCall Disabled:", delegatecallDisabled);
+  console.log("  Initial Modules:", initialModules.length > 0 ? initialModules : "(none)");
+  console.log("  DelegateCall Targets:", initialDelegatecallTargets.length > 0 ? initialDelegatecallTargets : "(none — DelegateCall blocked)");
 
   // Validate
   if (owners.length === 0) {
@@ -177,7 +189,8 @@ async function main() {
     owners,
     threshold,
     minExecutionDelay,
-    delegatecallDisabled
+    initialModules,
+    initialDelegatecallTargets
   );
 
   console.log("Salt:", salt);
@@ -193,9 +206,13 @@ async function main() {
   console.log("\nEstimating gas...");
   try {
     let estimatedGas;
-    if (minExecutionDelay > 0 || !delegatecallDisabled) {
-      estimatedGas = await factory["createWallet(address[],uint256,bytes32,uint32,bool)"].estimateGas(
-        owners, threshold, salt, minExecutionDelay, delegatecallDisabled
+    if (initialModules.length > 0 || initialDelegatecallTargets.length > 0) {
+      estimatedGas = await factory["createWallet(address[],uint256,bytes32,uint32,address[],address[])"].estimateGas(
+        owners, threshold, salt, minExecutionDelay, initialModules, initialDelegatecallTargets
+      );
+    } else if (minExecutionDelay > 0) {
+      estimatedGas = await factory["createWallet(address[],uint256,bytes32,uint32)"].estimateGas(
+        owners, threshold, salt, minExecutionDelay
       );
     } else {
       estimatedGas = await factory.createWallet.estimateGas(owners, threshold, salt);
@@ -207,9 +224,13 @@ async function main() {
 
   console.log("\nSending transaction...");
   let tx;
-  if (minExecutionDelay > 0 || !delegatecallDisabled) {
-    tx = await factory["createWallet(address[],uint256,bytes32,uint32,bool)"](
-      owners, threshold, salt, minExecutionDelay, delegatecallDisabled
+  if (initialModules.length > 0 || initialDelegatecallTargets.length > 0) {
+    tx = await factory["createWallet(address[],uint256,bytes32,uint32,address[],address[])"](
+      owners, threshold, salt, minExecutionDelay, initialModules, initialDelegatecallTargets
+    );
+  } else if (minExecutionDelay > 0) {
+    tx = await factory["createWallet(address[],uint256,bytes32,uint32)"](
+      owners, threshold, salt, minExecutionDelay
     );
   } else {
     tx = await factory.createWallet(owners, threshold, salt);
@@ -253,14 +274,20 @@ async function main() {
   const vaultThreshold = await vault.threshold();
   const vaultNonce = await vault.nonce();
   const vaultDelay = await vault.minExecutionDelay();
-  const vaultDelegateCallDisabled = await vault.delegatecallDisabled();
   const isRegistered = await factory.isWallet(walletAddress);
   const totalWallets = await factory.getWalletCount();
 
   console.log("  Owners:", vaultOwners.join(", "));
   console.log("  Threshold:", vaultThreshold.toString());
   console.log("  Min Execution Delay:", vaultDelay.toString(), "seconds");
-  console.log("  DelegateCall Disabled:", vaultDelegateCallDisabled);
+  if (initialDelegatecallTargets.length > 0) {
+    for (const target of initialDelegatecallTargets) {
+      const allowed = await vault.delegatecallAllowed(target);
+      console.log(`  DelegateCall Allowed [${target}]:`, allowed);
+    }
+  } else {
+    console.log("  DelegateCall Whitelist: empty (all DelegateCall blocked)");
+  }
   console.log("  Nonce:", vaultNonce.toString());
   console.log("  Registered in factory:", isRegistered);
   console.log("  Total factory wallets:", totalWallets.toString());
@@ -280,8 +307,11 @@ async function main() {
   if (minExecutionDelay > 0) {
     console.log(`  Min Execution Delay: ${minExecutionDelay}s`);
   }
-  if (!delegatecallDisabled) {
-    console.log(`  DelegateCall: ENABLED (module DelegateCall allowed)`);
+  if (initialModules.length > 0) {
+    console.log(`  Initial Modules: ${initialModules.join(", ")}`);
+  }
+  if (initialDelegatecallTargets.length > 0) {
+    console.log(`  DelegateCall Targets: ${initialDelegatecallTargets.join(", ")}`);
   }
 
   return walletAddress;

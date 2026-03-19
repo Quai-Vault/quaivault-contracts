@@ -59,7 +59,9 @@ contract QuaiVault is
     error SelfCallCannotHaveValue();
     error ExecutionDelayTooLong();       // BB-M-1: minExecutionDelay exceeds MAX_EXECUTION_DELAY
     error ImplementationSlotTampered();  // BB-L-4: DelegateCall overwrote ERC1967 implementation slot
-    error DelegateCallDisabled();        // CR-1: DelegateCall blocked by security hardening flag
+    error DelegateCallNotAllowed(address target);          // CR-1: DelegateCall target not on whitelist
+    error DelegatecallTargetAlreadyAllowed(address target); // CR-1: Target already whitelisted
+    error DelegatecallTargetNotAllowed(address target);     // CR-1: Target not on whitelist
 
     /// @notice Maximum number of owners allowed (prevents DoS from gas-intensive loops)
     uint256 public constant MAX_OWNERS = 20;
@@ -167,12 +169,12 @@ contract QuaiVault is
     ///      retain the executionDelay locked in at proposal time.
     uint32 public minExecutionDelay;
 
-    /// @notice CR-1: When true, modules cannot execute DelegateCall operations.
-    /// @dev Defaults to true (security-first). Closes the entire class of delegatecall-based
-    ///      storage corruption attacks (Bybit vector, arbitrary slot overwrite, SELFDESTRUCT via
-    ///      delegatecall). Owners can disable via setDelegatecallDisabled(false) if a module
-    ///      legitimately requires delegatecall (e.g., MultiSend batching).
-    bool public delegatecallDisabled;
+    /// @notice CR-1: Whitelist of addresses allowed as DelegateCall targets.
+    /// @dev Security-first default: empty (no DelegateCall allowed). Owners explicitly add
+    ///      trusted targets (e.g., MultiSendCallOnly) via addDelegatecallTarget(). Closes the entire class
+    ///      of delegatecall-based storage corruption attacks (Bybit vector, arbitrary slot overwrite,
+    ///      SELFDESTRUCT via delegatecall) while allowing opt-in for specific audited contracts.
+    mapping(address => bool) public delegatecallAllowed;
 
     // ==================== Events ====================
 
@@ -232,8 +234,10 @@ contract QuaiVault is
     /// @notice Emitted when an expired tx is formally closed via expireTransaction
     event TransactionExpired(bytes32 indexed txHash);
 
-    /// @notice CR-1: Emitted when the delegatecall security flag is toggled
-    event DelegatecallDisabledChanged(bool disabled);
+    /// @notice CR-1: Emitted when a DelegateCall target is added to the whitelist
+    event DelegatecallTargetAdded(address indexed target);
+    /// @notice CR-1: Emitted when a DelegateCall target is removed from the whitelist
+    event DelegatecallTargetRemoved(address indexed target);
 
     // ==================== Modifiers ====================
 
@@ -281,12 +285,15 @@ contract QuaiVault is
      * @param _owners Array of owner addresses
      * @param _threshold Number of required approvals
      * @param _minExecutionDelay Vault-level minimum timelock for external calls in seconds (0 = simple quorum)
+     * @param _initialModules Array of module addresses to enable at deploy time (empty = no modules)
+     * @param _initialDelegatecallTargets Array of DelegateCall whitelist targets (empty = no DelegateCall allowed)
      */
     function initialize(
         address[] memory _owners,
         uint256 _threshold,
         uint32 _minExecutionDelay,
-        bool _delegatecallDisabled
+        address[] memory _initialModules,
+        address[] memory _initialDelegatecallTargets
     ) external initializer {
         if (_owners.length == 0) revert OwnersRequired();
         if (_owners.length > MAX_OWNERS) revert TooManyOwners();
@@ -316,9 +323,17 @@ contract QuaiVault is
         // Initialize module linked list (empty list: sentinel points to itself)
         modules[SENTINEL_MODULES] = SENTINEL_MODULES;
 
-        // CR-1: DelegateCall configurable at deploy time (security-first default: true)
-        delegatecallDisabled = _delegatecallDisabled;
-        emit DelegatecallDisabledChanged(_delegatecallDisabled);
+        // Enable initial modules (e.g., Baal DAO governance contract)
+        for (uint256 i = 0; i < _initialModules.length;) {
+            _enableModule(_initialModules[i]);
+            unchecked { i++; }
+        }
+
+        // CR-1: Populate DelegateCall whitelist (empty = no DelegateCall allowed)
+        for (uint256 i = 0; i < _initialDelegatecallTargets.length;) {
+            _addDelegatecallTarget(_initialDelegatecallTargets[i]);
+            unchecked { i++; }
+        }
     }
 
     // ==================== Transaction Lifecycle ====================
@@ -842,17 +857,32 @@ contract QuaiVault is
     }
 
     /**
-     * @notice CR-1: Toggle the delegatecall security hardening flag
-     * @param disabled true = block all module DelegateCall operations (secure default);
-     *                 false = allow module DelegateCall (required for MultiSend batching)
+     * @notice CR-1: Add an address to the DelegateCall whitelist
+     * @param target Address to allow as a DelegateCall target (e.g., MultiSendCallOnly)
      */
-    function setDelegatecallDisabled(bool disabled) external onlySelf {
-        _setDelegatecallDisabled(disabled);
+    function addDelegatecallTarget(address target) external onlySelf {
+        _addDelegatecallTarget(target);
     }
 
-    function _setDelegatecallDisabled(bool disabled) internal {
-        delegatecallDisabled = disabled;
-        emit DelegatecallDisabledChanged(disabled);
+    function _addDelegatecallTarget(address target) internal {
+        if (target == address(0)) revert InvalidDestinationAddress();
+        if (delegatecallAllowed[target]) revert DelegatecallTargetAlreadyAllowed(target);
+        delegatecallAllowed[target] = true;
+        emit DelegatecallTargetAdded(target);
+    }
+
+    /**
+     * @notice CR-1: Remove an address from the DelegateCall whitelist
+     * @param target Address to remove from the whitelist
+     */
+    function removeDelegatecallTarget(address target) external onlySelf {
+        _removeDelegatecallTarget(target);
+    }
+
+    function _removeDelegatecallTarget(address target) internal {
+        if (!delegatecallAllowed[target]) revert DelegatecallTargetNotAllowed(target);
+        delegatecallAllowed[target] = false;
+        emit DelegatecallTargetRemoved(target);
     }
 
     // ==================== Expired Transaction Cleanup ====================
@@ -924,9 +954,12 @@ contract QuaiVault is
         } else if (selector == this.setMinExecutionDelay.selector) {
             uint32 delay = abi.decode(_stripSelector(data), (uint32));
             _setMinExecutionDelay(delay);
-        } else if (selector == this.setDelegatecallDisabled.selector) {
-            bool disabled = abi.decode(_stripSelector(data), (bool));
-            _setDelegatecallDisabled(disabled);
+        } else if (selector == this.addDelegatecallTarget.selector) {
+            address target = abi.decode(_stripSelector(data), (address));
+            _addDelegatecallTarget(target);
+        } else if (selector == this.removeDelegatecallTarget.selector) {
+            address target = abi.decode(_stripSelector(data), (address));
+            _removeDelegatecallTarget(target);
         } else {
             // H-3: Revert on unrecognized self-call selectors
             revert UnrecognizedSelfCall(selector);
@@ -1067,8 +1100,8 @@ contract QuaiVault is
         if (to == address(0)) revert InvalidDestinationAddress();
 
         if (operation == Enum.Operation.DelegateCall) {
-            // CR-1: Block delegatecall entirely when hardening flag is set
-            if (delegatecallDisabled) revert DelegateCallDisabled();
+            // CR-1: Only allow DelegateCall to explicitly whitelisted targets
+            if (!delegatecallAllowed[to]) revert DelegateCallNotAllowed(to);
             // BB-L-4: Snapshot implementation slot before delegatecall to detect tampering.
             // A malicious delegatecall target could overwrite the ERC1967 slot, effectively
             // "upgrading" this non-upgradeable proxy to a hostile implementation.
@@ -1116,8 +1149,8 @@ contract QuaiVault is
         if (to == address(0)) revert InvalidDestinationAddress();
 
         if (operation == Enum.Operation.DelegateCall) {
-            // CR-1: Block delegatecall entirely when hardening flag is set
-            if (delegatecallDisabled) revert DelegateCallDisabled();
+            // CR-1: Only allow DelegateCall to explicitly whitelisted targets
+            if (!delegatecallAllowed[to]) revert DelegateCallNotAllowed(to);
             // BB-L-4: Same implementation slot guard as execTransactionFromModule
             bytes32 implBefore;
             assembly { implBefore := sload(_ERC1967_IMPL_SLOT) }

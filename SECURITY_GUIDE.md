@@ -65,8 +65,9 @@ that can trigger the module's execution function has full access to the wallet.
 - Review module source code before enabling — understand exactly what it can do
 - Regularly audit which modules are enabled: call `getModulesPaginated(0x1, 50)`
 - Disable modules immediately when no longer needed
-- Keep `delegatecallDisabled = true` (the default) unless you specifically need MultiSend batching
-- The built-in SocialRecoveryModule and MultiSend library have been audited alongside
+- Keep the DelegateCall whitelist empty (the default) unless you specifically need batching
+- When batching is needed, whitelist `MultiSendCallOnly` — it blocks nested DelegateCall
+- The built-in SocialRecoveryModule and MultiSendCallOnly have been audited alongside
   the core contract. Third-party Zodiac modules have not.
 
 ### 3. Social Recovery Guardian Takeover
@@ -249,7 +250,8 @@ Set up automated alerts for these on-chain events:
 | `RecoveryExpiredEvent` | A recovery expired and was cleaned up. Investigate if unexpected. |
 | `RecoveryConfigCleared` | Guardian configuration was deleted after a successful recovery. New owners must reconfigure guardians. |
 | `MinExecutionDelayChanged` | Timelock changed. A delay reduction could weaken security. |
-| `DelegatecallDisabledChanged` | DelegateCall hardening toggled. If set to `false`, investigate immediately. |
+| `DelegatecallTargetAdded` | A new address was whitelisted for DelegateCall. Verify the target is a known, audited contract. |
+| `DelegatecallTargetRemoved` | An address was removed from the DelegateCall whitelist. |
 
 **The most critical alert is `RecoveryInitiated`.** You have until `executionTime + recoveryPeriod`
 (2x the recovery period from initiation, minimum 48 hours total lifetime) before the recovery
@@ -309,42 +311,45 @@ recommends: *"Disable delegatecall functionality entirely"* for wallets holding 
 value. Gnosis Safe attempted to add a Module Guard in v1.5.0 to restrict module operations
 but dropped the feature due to contract bytecode size constraints.
 
-QuaiVault ships a simpler, more effective solution: a `delegatecallDisabled` flag that
-blocks the operation type entirely at the contract level.
+QuaiVault ships a more effective solution: a **DelegateCall whitelist** (`delegatecallAllowed`
+mapping) that only permits DelegateCall to explicitly approved target addresses.
 
 ### How It Works
 
 ```solidity
-bool public delegatecallDisabled;  // true by default
+mapping(address => bool) public delegatecallAllowed;  // empty by default
 
 // In execTransactionFromModule:
 if (operation == Enum.Operation.DelegateCall) {
-    if (delegatecallDisabled) revert DelegateCallDisabled();
+    if (!delegatecallAllowed[to]) revert DelegateCallNotAllowed(to);
     // ... existing BB-L-4 implementation slot check ...
 }
 ```
 
-**Default: `true` (disabled).** All new wallets deployed through the factory have
-DelegateCall blocked from the moment of creation.
+**Default: empty whitelist.** All new wallets deployed through the factory have
+DelegateCall blocked to all targets from the moment of creation.
 
-**Toggle:** Owners can change this via a multisig self-call:
+**Management:** Owners can add/remove targets via multisig self-calls:
 ```
-setDelegatecallDisabled(false)  // allow DelegateCall (opt-in, requires consensus)
-setDelegatecallDisabled(true)   // block DelegateCall (re-harden)
+addDelegatecallTarget(multiSendCallOnlyAddress)  // whitelist a specific target
+removeDelegatecallTarget(multiSendCallOnlyAddress)  // remove from whitelist
 ```
 
-**Event:** `DelegatecallDisabledChanged(bool disabled)` is emitted on every toggle for
-indexer tracking.
+Targets can also be whitelisted at deploy time via the `initialDelegatecallTargets`
+parameter in `initialize()` or the 6-param `createWallet` factory overload.
 
-### What DelegateCall Disabling Closes
+**Events:** `DelegatecallTargetAdded(address target)` and `DelegatecallTargetRemoved(address target)`
+are emitted for indexer tracking.
 
-When `delegatecallDisabled = true`, the following attack vectors are **permanently closed**:
+### What an Empty DelegateCall Whitelist Closes
+
+When no targets are whitelisted (the default), the following attack vectors are **permanently closed**:
 
 | Attack Vector | Description |
 |---|---|
 | **Bybit-style slot overwrite** | DelegateCall to a contract that overwrites the ERC1967 implementation slot |
 | **Arbitrary storage corruption** | DelegateCall to a contract that overwrites owners, threshold, modules, or any other storage |
-| **MultiSend nested delegatecall** | A MultiSend batch containing inner DelegateCall sub-transactions that bypass the BB-L-4 slot check |
+| **Nested delegatecall via batching** | A batch containing inner DelegateCall sub-transactions that bypass the BB-L-4 slot check (MultiSendCallOnly prevents this) |
 | **SELFDESTRUCT via delegatecall** | On Quai Network (London EVM), SELFDESTRUCT is still functional. A DelegateCall to a contract containing SELFDESTRUCT would destroy the proxy and drain all funds |
 | **Future unknown delegatecall attacks** | Any attack vector we haven't imagined that relies on executing arbitrary code in the wallet's storage context |
 
@@ -363,33 +368,41 @@ in its own storage context.
 | **Zodiac Reality Module** | `Call` only | Yes |
 | **Zodiac Bridge Module** | `Call` only | Yes |
 | **Any module calling `addOwner`, `removeOwner`, `changeThreshold`** | `Call` (self-call via module) | Yes |
-| **MultiSend** (batched transactions) | **DelegateCall required** | **No** |
-| **Custom modules with storage manipulation** | **DelegateCall required** | **No** |
+| **MultiSendCallOnly** (batched Call transactions) | **DelegateCall required** | **No** — must be whitelisted |
+| **Custom modules with storage manipulation** | **DelegateCall required** | **No** — must be whitelisted |
 
-**The only common use case that requires DelegateCall is MultiSend batching** — executing
-multiple transactions atomically in a single call. MultiSend must run via DelegateCall
-because it needs to execute sub-transactions *from* the wallet's address (as `msg.sender`).
+**The only common use case that requires DelegateCall is batched transactions** — executing
+multiple operations atomically in a single call. The batching contract must run via
+DelegateCall because it needs to execute sub-transactions *from* the wallet's address
+(as `msg.sender`).
 
-### When to Enable DelegateCall
+### MultiSendCallOnly
 
-In most cases: **never.** The default `delegatecallDisabled = true` is the correct
-posture for wallets holding significant value.
+QuaiVault ships **MultiSendCallOnly** for batched transactions. It executes multiple
+Call operations atomically but **rejects nested DelegateCall sub-transactions**. If any
+sub-transaction in the batch has `operation=1` (DelegateCall), the entire batch reverts.
+This prevents a whitelisted batching contract from being used to DelegateCall arbitrary
+targets within a batch without hitting the vault's whitelist check.
 
-Consider enabling DelegateCall (`setDelegatecallDisabled(false)`) only if:
+### When to Whitelist DelegateCall Targets
 
-1. **You need MultiSend batching** — e.g., a module that must execute multiple operations
-   atomically (all-or-nothing). Without DelegateCall, the module must make individual
-   `Call` operations, which execute independently (no atomicity guarantee across calls).
+In most cases: **never.** The default empty whitelist is the correct posture for wallets
+holding significant value.
 
-2. **You have audited the specific module** that requires DelegateCall and understand
-   exactly what storage it accesses.
+Consider whitelisting a DelegateCall target only if:
 
-3. **You re-disable DelegateCall after use** — if you only need it for a specific operation,
-   enable it, execute, then immediately re-harden with `setDelegatecallDisabled(true)`.
+1. **You need batching** — whitelist `MultiSendCallOnly`.
+   Without any whitelisted target, modules must make individual `Call` operations,
+   which execute independently (no atomicity guarantee across calls).
 
-### What You Lose with DelegateCall Disabled
+2. **You have audited the specific target** and understand exactly what storage it accesses.
 
-- **MultiSend batching**: Modules must make individual calls instead of batched operations.
+3. **You remove it from the whitelist after use** — if you only need it for a specific
+   operation, whitelist it, execute, then remove with `removeDelegatecallTarget`.
+
+### What You Lose with an Empty Whitelist
+
+- **Batching**: Modules must make individual calls instead of batched operations.
   This means multiple transactions instead of one atomic batch. Each call succeeds or
   fails independently.
 
@@ -405,17 +418,17 @@ What you **do not lose**:
 - ETH/token receiving
 - Everything except `DelegateCall` through the module execution path
 
-### Defense-in-Depth: DelegateCall + BB-L-4
+### Defense-in-Depth: Whitelist + BB-L-4
 
-Even when DelegateCall is enabled (`delegatecallDisabled = false`), QuaiVault still has
-the BB-L-4 defense: a pre/post snapshot of the ERC1967 implementation slot around every
-DelegateCall. If the delegated code overwrites the implementation slot, the transaction
-reverts with `ImplementationSlotTampered`.
+Even when a DelegateCall target is whitelisted, QuaiVault still has the BB-L-4 defense:
+a pre/post snapshot of the ERC1967 implementation slot around every DelegateCall. If the
+delegated code overwrites the implementation slot, the transaction reverts with
+`ImplementationSlotTampered`.
 
 This means there are **two layers of defense**:
 
-1. **CR-1 (`delegatecallDisabled`)**: Blocks DelegateCall entirely. Prevents all
-   storage-context attacks. Enabled by default.
+1. **CR-1 (`delegatecallAllowed` whitelist)**: Only permits DelegateCall to explicitly
+   approved targets. Empty by default — blocks all DelegateCall.
 
 2. **BB-L-4 (implementation slot check)**: If DelegateCall is allowed, guards the most
    critical single slot (the proxy implementation pointer). Does not protect other storage.
@@ -501,7 +514,7 @@ funds are unaffected — this is purely a UI issue.
 |---|---|---|
 | Key compromise at threshold | Partially (timelock delays external calls) | Hardware wallets, key distribution, high threshold |
 | Buggy/malicious module | Partially (`onlySelf` to enable) | Only enable audited modules, regular review |
-| Module DelegateCall storage attack | Yes — blocked by default (CR-1) | Keep `delegatecallDisabled = true` |
+| Module DelegateCall storage attack | Yes — blocked by default (CR-1 whitelist) | Keep whitelist empty; when needed, whitelist `MultiSendCallOnly` only |
 | Guardian takeover | Partially (recovery delay period) | Independent guardians, active monitoring, owner key availability |
 | Frontend/indexer deception | No | Verify calldata on-chain, multiple independent UIs |
 | Social engineering | No | Out-of-band verification, no approvals under pressure |

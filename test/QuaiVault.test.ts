@@ -106,13 +106,13 @@ describe("QuaiVault", function () {
 
     it("should reject double initialization (Initializable)", async function () {
       await expect(
-        wallet.initialize([owner1.address], 1, 0, true)
+        wallet.initialize([owner1.address], 1, 0, [], [])
       ).to.be.revertedWithCustomError(wallet, "InvalidInitialization");
     });
 
     it("should reject initialization on implementation contract directly", async function () {
       await expect(
-        implementation.initialize([owner1.address], 1, 0, true)
+        implementation.initialize([owner1.address], 1, 0, [], [])
       ).to.be.revertedWithCustomError(
         implementation,
         "InvalidInitialization"
