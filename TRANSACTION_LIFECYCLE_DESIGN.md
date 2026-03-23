@@ -339,8 +339,9 @@ function expireTransaction(bytes32 txHash) external;
 // Update vault-level minimum delay (onlySelf — requires multisig self-call)
 function setMinExecutionDelay(uint32 delay) external onlySelf;
 
-// CR-1: Toggle module DelegateCall blocking (onlySelf — requires multisig self-call)
-function setDelegatecallDisabled(bool disabled) external onlySelf;
+// CR-1: DelegateCall whitelist management (onlySelf — requires multisig self-call)
+function addDelegatecallTarget(address target) external onlySelf;
+function removeDelegatecallTarget(address target) external onlySelf;
 ```
 
 ### Events
@@ -361,7 +362,8 @@ event TransactionExpired(bytes32 indexed txHash);
 
 // Configuration
 event MinExecutionDelayChanged(uint32 oldDelay, uint32 newDelay);
-event DelegatecallDisabledChanged(bool disabled);
+event DelegatecallTargetAdded(address indexed target);
+event DelegatecallTargetRemoved(address indexed target);
 
 // Value reception
 event Received(address indexed sender, uint256 amount);
@@ -381,31 +383,38 @@ error ExpirationTooSoon(uint256 minimumExpiration); // carries minimum valid exp
 ## Factory Integration
 
 ```solidity
-// Simple: creates vault with minExecutionDelay = 0
+// Simple: creates vault with minExecutionDelay = 0, no modules, no DelegateCall targets
 function createWallet(address[] memory owners, uint256 threshold,
     bytes32 salt) external returns (address);
 
-// With minExecutionDelay (delegatecallDisabled defaults to true)
+// With minExecutionDelay
 // minExecutionDelay must be <= MAX_EXECUTION_DELAY (30 days / 2,592,000 seconds)
 // Reverts with ExecutionDelayTooLong() if exceeded
 function createWallet(address[] memory owners, uint256 threshold,
     bytes32 salt, uint32 minExecutionDelay) external returns (address);
 
-// Full configuration: minExecutionDelay + delegatecallDisabled (CR-1)
+// With initial modules (e.g., BaalAndVaultSummoner)
 function createWallet(address[] memory owners, uint256 threshold,
-    bytes32 salt, uint32 minExecutionDelay, bool delegatecallDisabled)
+    bytes32 salt, uint32 minExecutionDelay, address[] memory initialModules)
     external returns (address);
 
+// Full configuration: modules + DelegateCall whitelist targets (CR-1)
+function createWallet(address[] memory owners, uint256 threshold,
+    bytes32 salt, uint32 minExecutionDelay, address[] memory initialModules,
+    address[] memory initialDelegatecallTargets) external returns (address);
+
 // Deterministic address prediction (CREATE2)
-// All 6 params required — bytecodeHash depends on constructor args
+// All params required — bytecodeHash depends on constructor args
 function predictWalletAddress(address deployer, bytes32 salt,
     address[] memory owners, uint256 threshold,
-    uint32 minExecutionDelay, bool delegatecallDisabled)
+    uint32 minExecutionDelay, address[] memory initialModules,
+    address[] memory initialDelegatecallTargets)
     external view returns (address);
 
-// initialize() — 4 params including delegatecallDisabled (CR-1)
+// initialize() — 5 params with initialModules and DelegateCall whitelist (CR-1)
 function initialize(address[] memory owners, uint256 threshold,
-    uint32 minExecutionDelay, bool delegatecallDisabled) external initializer;
+    uint32 minExecutionDelay, address[] memory initialModules,
+    address[] memory initialDelegatecallTargets) external initializer;
 
 // Factory constants and errors
 uint32 public constant MAX_EXECUTION_DELAY = 30 days; // 2,592,000 seconds

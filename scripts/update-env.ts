@@ -19,7 +19,7 @@ const ENV_VARS: Record<string, string> = {
   QuaiVault: "QUAIVAULT_IMPLEMENTATION",
   QuaiVaultFactory: "QUAIVAULT_FACTORY",
   SocialRecoveryModule: "SOCIAL_RECOVERY_MODULE",
-  MultiSend: "MULTISEND",
+  MultiSendCallOnly: "MULTISEND_CALL_ONLY",
   MockModule: "MOCK_MODULE",
   MockERC721: "MOCK_ERC721",
   MockERC1155: "MOCK_ERC1155",

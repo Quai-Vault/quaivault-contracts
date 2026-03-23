@@ -84,7 +84,7 @@ contract QuaiVaultFactory {
     }
 
     /**
-     * @notice Create a new multisig wallet
+     * @notice Create a new multisig wallet (simplest — no delay, no modules, no DelegateCall)
      * @param owners Array of owner addresses
      * @param threshold Number of required approvals
      * @param salt Salt for CREATE2 (must be mined for valid shard prefix)
@@ -95,25 +95,7 @@ contract QuaiVaultFactory {
         uint256 threshold,
         bytes32 salt
     ) external returns (address wallet) {
-        _validateOwners(owners, threshold);
-
-        // Encode initialize call for the constructor's delegatecall
-        bytes memory initData = abi.encodeCall(
-            QuaiVault.initialize,
-            (owners, threshold, 0, true)
-        );
-
-        // Deploy ERC1967 constructor proxy with CREATE2
-        bytes32 fullSalt = keccak256(abi.encodePacked(msg.sender, salt));
-        wallet = address(new QuaiVaultProxy{salt: fullSalt}(implementation, initData));
-
-        // Register wallet
-        deployedWallets.push(wallet);
-        isWallet[wallet] = true;
-
-        emit WalletCreated(wallet, owners, threshold, msg.sender, salt);
-
-        return wallet;
+        return _createWallet(owners, threshold, salt, 0, new address[](0), new address[](0));
     }
 
     /**
@@ -130,26 +112,26 @@ contract QuaiVaultFactory {
         bytes32 salt,
         uint32 minExecutionDelay
     ) external returns (address wallet) {
-        _validateOwners(owners, threshold);
-        if (minExecutionDelay > MAX_EXECUTION_DELAY) revert ExecutionDelayTooLong(); // L-1
+        return _createWallet(owners, threshold, salt, minExecutionDelay, new address[](0), new address[](0));
+    }
 
-        // Encode initialize call for the constructor's delegatecall
-        bytes memory initData = abi.encodeCall(
-            QuaiVault.initialize,
-            (owners, threshold, minExecutionDelay, true)
-        );
-
-        // Deploy ERC1967 constructor proxy with CREATE2
-        bytes32 fullSalt = keccak256(abi.encodePacked(msg.sender, salt));
-        wallet = address(new QuaiVaultProxy{salt: fullSalt}(implementation, initData));
-
-        // Register wallet
-        deployedWallets.push(wallet);
-        isWallet[wallet] = true;
-
-        emit WalletCreated(wallet, owners, threshold, msg.sender, salt);
-
-        return wallet;
+    /**
+     * @notice Create a new multisig wallet with initial modules (e.g., BaalAndVaultSummoner)
+     * @param owners Array of owner addresses
+     * @param threshold Number of required approvals
+     * @param salt Salt for CREATE2 (must be mined for valid shard prefix)
+     * @param minExecutionDelay Vault-level minimum delay for external calls in seconds (0 = simple quorum)
+     * @param initialModules Array of module addresses to enable at deploy time
+     * @return wallet Address of the created wallet
+     */
+    function createWallet(
+        address[] calldata owners,
+        uint256 threshold,
+        bytes32 salt,
+        uint32 minExecutionDelay,
+        address[] calldata initialModules
+    ) external returns (address wallet) {
+        return _createWallet(owners, threshold, salt, minExecutionDelay, initialModules, new address[](0));
     }
 
     /**
@@ -158,8 +140,8 @@ contract QuaiVaultFactory {
      * @param threshold Number of required approvals
      * @param salt Salt for CREATE2 (must be mined for valid shard prefix)
      * @param minExecutionDelay Vault-level minimum delay for external calls in seconds (0 = simple quorum)
-     * @param delegatecallDisabled CR-1: When true, modules cannot execute DelegateCall operations.
-     *        Set to false for vaults that need DelegateCall modules (e.g., Baal DAO governance via MultiSend).
+     * @param initialModules Array of module addresses to enable at deploy time (empty = no modules)
+     * @param initialDelegatecallTargets CR-1: Addresses allowed as DelegateCall targets (empty = no DelegateCall)
      * @return wallet Address of the created wallet
      */
     function createWallet(
@@ -167,15 +149,30 @@ contract QuaiVaultFactory {
         uint256 threshold,
         bytes32 salt,
         uint32 minExecutionDelay,
-        bool delegatecallDisabled
+        address[] calldata initialModules,
+        address[] calldata initialDelegatecallTargets
     ) external returns (address wallet) {
+        return _createWallet(owners, threshold, salt, minExecutionDelay, initialModules, initialDelegatecallTargets);
+    }
+
+    /**
+     * @notice Internal wallet creation — shared by all overloads
+     */
+    function _createWallet(
+        address[] calldata owners,
+        uint256 threshold,
+        bytes32 salt,
+        uint32 minExecutionDelay,
+        address[] memory initialModules,
+        address[] memory initialDelegatecallTargets
+    ) internal returns (address wallet) {
         _validateOwners(owners, threshold);
         if (minExecutionDelay > MAX_EXECUTION_DELAY) revert ExecutionDelayTooLong(); // L-1
 
         // Encode initialize call for the constructor's delegatecall
         bytes memory initData = abi.encodeCall(
             QuaiVault.initialize,
-            (owners, threshold, minExecutionDelay, delegatecallDisabled)
+            (owners, threshold, minExecutionDelay, initialModules, initialDelegatecallTargets)
         );
 
         // Deploy ERC1967 constructor proxy with CREATE2
@@ -198,7 +195,8 @@ contract QuaiVaultFactory {
      * @param owners Array of owner addresses (needed for constructor arg hash)
      * @param threshold Number of required approvals
      * @param minExecutionDelay Vault-level minimum delay (0 for simple quorum)
-     * @param delegatecallDisabled CR-1: Whether DelegateCall is blocked for modules
+     * @param initialModules Array of module addresses to enable at deploy time
+     * @param initialDelegatecallTargets CR-1: DelegateCall whitelist targets
      * @return Predicted wallet address
      */
     function predictWalletAddress(
@@ -207,12 +205,13 @@ contract QuaiVaultFactory {
         address[] calldata owners,
         uint256 threshold,
         uint32 minExecutionDelay,
-        bool delegatecallDisabled
+        address[] calldata initialModules,
+        address[] calldata initialDelegatecallTargets
     ) external view returns (address) {
         bytes32 fullSalt = keccak256(abi.encodePacked(deployer, salt));
         bytes memory initData = abi.encodeCall(
             QuaiVault.initialize,
-            (owners, threshold, minExecutionDelay, delegatecallDisabled)
+            (owners, threshold, minExecutionDelay, initialModules, initialDelegatecallTargets)
         );
         bytes32 bytecodeHash = keccak256(abi.encodePacked(
             type(QuaiVaultProxy).creationCode,

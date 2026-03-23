@@ -14,7 +14,7 @@ import "../libraries/Enum.sol";
  * - OpenZeppelin Governor modules
  * - Zodiac Modifiers (Delay, Roles, Scope)
  * - Safe App and DAOhaus UIs
- * - MultiSend batched transactions
+ * - MultiSendCallOnly batched transactions
  *
  * ## Usage for Module Developers
  *
@@ -25,7 +25,7 @@ import "../libraries/Enum.sol";
  * ```
  *
  * ### Advanced Modules (DelegateCall, batching, return data)
- * For modules that need DelegateCall (e.g., MultiSend batching):
+ * For modules that need DelegateCall (e.g., MultiSendCallOnly batching):
  * ```solidity
  * IAvatar(avatar).execTransactionFromModule(to, value, data, Enum.Operation.DelegateCall);
  * ```

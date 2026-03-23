@@ -2,12 +2,18 @@
 pragma solidity 0.8.22; // locked to match production compiler version
 
 /**
- * @title MultiSend - Allows batched transactions via delegatecall
+ * @title MultiSendCallOnly - Batched transactions restricted to Call operations only
  * @author Gnosis Team (Richard Meissner - richard@gnosis.io)
  * @notice Source: https://github.com/safe-global/safe-contracts
- * @dev Adapted for Quai-Vault Zodiac integration
+ * @dev Adapted for Quai-Vault. Unlike MultiSend, this variant rejects any transaction
+ *      with operation=1 (DelegateCall), closing the nested DelegateCall bypass vector
+ *      where a whitelisted MultiSend could be used to DelegateCall arbitrary targets
+ *      within a batch without hitting the vault's DelegateCall whitelist check.
+ *
+ *      Recommended as the default DelegateCall whitelist target for most vaults.
+ *      Only use regular MultiSend if nested DelegateCall is explicitly required.
  */
-contract MultiSend {
+contract MultiSendCallOnly {
     address private immutable multisendSingleton;
 
     constructor() {
@@ -27,9 +33,9 @@ contract MultiSend {
     }
 
     /**
-     * @notice Execute multiple transactions in sequence
+     * @notice Execute multiple Call transactions in sequence (no DelegateCall allowed)
      * @dev Each transaction is encoded as:
-     *      - operation (uint8): 0 for call, 1 for delegatecall
+     *      - operation (uint8): MUST be 0 (Call). Reverts if 1 (DelegateCall).
      *      - to (address): target address
      *      - value (uint256): ETH value
      *      - dataLength (uint256): length of data
@@ -54,19 +60,19 @@ contract MultiSend {
                 // Load data pointer
                 let data := add(transactions, add(i, 0x55))
 
-                let success := 0
-                switch operation
-                case 0 {
-                    // Call
-                    success := call(gas(), to, value, data, dataLength, 0, 0)
-                }
-                case 1 {
-                    // DelegateCall
-                    success := delegatecall(gas(), to, data, dataLength, 0, 0)
+                // Reject DelegateCall (operation != 0)
+                if operation {
+                    // revert("DelegateCall not allowed")
+                    mstore(0, 0x08c379a000000000000000000000000000000000000000000000000000000000)
+                    mstore(4, 0x20)
+                    mstore(0x24, 24)
+                    mstore(0x44, "DelegateCall not allowed")
+                    revert(0, 0x64)
                 }
 
+                let success := call(gas(), to, value, data, dataLength, 0, 0)
+
                 if eq(success, 0) {
-                    // L-3: Propagate revert data from failed sub-transaction for debuggability
                     returndatacopy(0, 0, returndatasize())
                     revert(0, returndatasize())
                 }
