@@ -1,0 +1,18 @@
+{
+  "network": "cyprus1",
+  "chainId": "9",
+  "deployer": "0x0024B1B6979f0648D9179d915Af45A0da7ddc3ED",
+  "timestamp": "2026-05-25T14:25:13.189Z",
+  "contracts": {
+    "QuaiVault": "0x0043b32a3c12Edbfe6472C2b310BEc15c0E04F35",
+    "QuaiVaultFactory": "0x0066953451cF092CB1592BBaa46416e2B8AA4537",
+    "SocialRecoveryModule": "0x002E83Aab20B502c57024294412d28dB613De848",
+    "MultiSendCallOnly": "0x000388E1E186793620a647d1e9fc7aA645B9A30d"
+  },
+  "ipfsHashes": {
+    "QuaiVault": "QmX9d8Wu3HkUktFsAwr7NhfKAQVywx2uwB7RKXqmVdNjSC",
+    "QuaiVaultFactory": "QmS6RschiJaRH5vANXQ5uf64dtXekCtD6iZDGW3dbsq3pB",
+    "SocialRecoveryModule": "QmThh5pGPJbs36VT64TrDqpKZdKba957WKgWi9DjVfg8uX",
+    "MultiSendCallOnly": "QmRxuXz5SX2cVTU5XLZHVa12qLvoon1xHEAWsZYXCVTWFL"
+  }
+}

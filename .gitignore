@@ -12,7 +12,11 @@ coverage.json
 
 # Environment
 .env
+.env.testnet.bak
+.env.mainnet.bak
 .env.e2e
+.env.e2e.testnet.bak
+.env.e2e.mainnet.bak
 .env.local
 .env.*.local
 
